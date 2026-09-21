@@ -1,0 +1,472 @@
+# ============================================================================
+# AI Ops Platform — 主配置文件样例
+#
+# 使用方式：
+#   1. 复制为 config.yaml 并填入真实信息（config.yaml 已被 .gitignore 排除）
+#   2. Docker 部署时挂载：-v /your/path/config.yaml:/app/config/config.yaml:ro
+#   3. 也可用环境变量 AIOPS_CONFIG=/path/to/config.yaml 指定路径
+#
+# 安全提示：
+#   - 凡是写 ${ENV_NAME} 的地方，都会在加载时从环境变量插值。
+#     API Key、SSH 密码等敏感信息请一律用环境变量，不要写进本文件。
+#   - 本文件所有主机地址均为示例，请替换为你的真实环境。
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# 服务自身
+# ---------------------------------------------------------------------------
+server:
+  host: 0.0.0.0            # 容器内监听 0.0.0.0；裸机部署可改 127.0.0.1
+  port: 3000
+  # 单页应用静态资源目录（web 构建产物）。相对路径基于项目根目录。
+  webRoot: web/dist
+  # API 访问令牌。留空表示不校验（仅限内网单机自用）。
+  # 生产环境请设置：${AIOPS_API_TOKEN}
+  apiToken: ${AIOPS_API_TOKEN}
+  logLevel: info           # debug | info | warn | error
+
+# ---------------------------------------------------------------------------
+# 数据库（内置 SQLite，零原生依赖）
+# ---------------------------------------------------------------------------
+database:
+  # Docker 部署时建议指向挂载卷，例如 /app/data/aiops.db
+  path: data/aiops.db
+
+# ---------------------------------------------------------------------------
+# AI / 大模型配置
+# ---------------------------------------------------------------------------
+ai:
+  # 分级路由：不同任务用不同档位的模型，兼顾成本与能力。
+  # provider 目前统一走 OpenAI 兼容协议（DeepSeek / 通义千问 / 智谱 / 本地 vLLM 等均兼容）。
+  providers:
+    deepseek:
+      baseUrl: https://api.deepseek.com/v1
+      apiKey: ${DEEPSEEK_API_KEY}
+      timeoutMs: 120000
+    qwen:
+      baseUrl: https://dashscope.aliyuncs.com/compatible-mode/v1
+      apiKey: ${DASHSCOPE_API_KEY}
+      timeoutMs: 120000
+    # 本地模型示例（Ollama / vLLM），内网无法出公网时启用
+    local:
+      baseUrl: http://127.0.0.1:11434/v1
+      apiKey: ${LOCAL_LLM_API_KEY}
+      timeoutMs: 180000
+
+  # 任务 → 模型档位映射
+  routing:
+    # 主力：根因推理。要求长上下文 + 中文技术日志理解能力
+    reasoning:
+      provider: deepseek
+      model: deepseek-chat
+      temperature: 0.1
+      maxTokens: 4000
+    # 轻量档：日志归一化、字段清洗等机械任务，用便宜模型
+    light:
+      provider: qwen
+      model: qwen-flash
+      temperature: 0.0
+      maxTokens: 1000
+    # 强模型档：写复盘报告 / 对外总结
+    report:
+      provider: deepseek
+      model: deepseek-reasoner
+      temperature: 0.2
+      maxTokens: 6000
+
+  # 成本控制
+  limits:
+    maxInputTokens: 60000        # 超过则进一步截断采样，防止费用失控
+    maxRetries: 2
+    cacheTtlSeconds: 600         # 相同输入的诊断结论缓存时长
+
+  # 数据脱敏（合规闸口）。所有送入大模型的文本必须过这一层。
+  redaction:
+    enabled: true
+    # 是否记录审计（只记类型与次数，绝不记录原值）
+    audit: true
+    rules:
+      - name: phone
+        enabled: true
+        pattern: '(?<!\d)1[3-9]\d{9}(?!\d)'
+        replacement: '<PHONE>'
+      - name: id_card
+        enabled: true
+        pattern: '(?<!\d)\d{17}[\dXx](?!\d)'
+        replacement: '<ID_CARD>'
+      - name: email
+        enabled: true
+        pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+        replacement: '<EMAIL>'
+      - name: bank_card
+        enabled: true
+        pattern: '(?<!\d)\d{16,19}(?!\d)'
+        replacement: '<BANK_CARD>'
+      - name: credential
+        enabled: true
+        pattern: '(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key)(["'']?\s*[:=]\s*)\S+'
+        replacement: '$1$2<REDACTED>'
+      - name: ip_address
+        # 内网 IP 通常可保留（有助于定位）；若甲方要求严格，改为 true
+        enabled: false
+        pattern: '(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])'
+        replacement: '<IP>'
+      - name: jwt
+        enabled: true
+        pattern: 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}'
+        replacement: '<JWT>'
+    # 业务定制规则示例：订单号（请按真实格式修改）
+    #  - name: order_no
+    #    enabled: true
+    #    pattern: 'SO\d{16}'
+    #    replacement: '<ORDER_ID>'
+
+# ---------------------------------------------------------------------------
+# 主机 / 数据源信息
+# ---------------------------------------------------------------------------
+datasources:
+  # --- Elasticsearch 日志源（可配多个：生产、测试）---
+  elasticsearch:
+    - id: prod-es
+      name: 生产 ES
+      url: http://172.18.136.79:9797
+      enabled: true
+      # 建议只读账号；留空表示匿名访问
+      username: ${ES_PROD_USERNAME}
+      password: ${ES_PROD_PASSWORD}
+      timeoutMs: 15000
+      # 单次查询最多拉取的日志行数（硬上限，防止打爆 ES 和内存）
+      maxDocs: 20000
+      indices:
+        - migo-application-log-prod-*
+        - migo-wms-open-api*
+        - migo-nginx-prod*
+
+    - id: dev-es
+      name: 开发/测试 ES
+      url: http://192.168.10.120:9797
+      enabled: false
+      username: ${ES_DEV_USERNAME}
+      password: ${ES_DEV_PASSWORD}
+      timeoutMs: 15000
+      maxDocs: 20000
+      indices:
+        - '*dev*'
+        - '*test*'
+        - '*uat*'
+        - '*pre*'
+
+  # --- Prometheus 指标源 ---
+  prometheus:
+    - id: prod-prom
+      name: Prometheus
+      url: http://192.168.11.156:9090
+      enabled: true
+      username: ${PROM_USERNAME}
+      password: ${PROM_PASSWORD}
+      timeoutMs: 15000
+      # 诊断时自动查询的 PromQL 模板，{service} {instance} 会被替换
+      queries:
+        - name: cpu_usage
+          promql: '100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle",instance=~"{instance}"}[5m])) * 100)'
+        - name: memory_usage
+          promql: '(1 - node_memory_MemAvailable_bytes{instance=~"{instance}"}/node_memory_MemTotal_bytes{instance=~"{instance}"}) * 100'
+        - name: disk_usage
+          promql: '(1 - node_filesystem_avail_bytes{instance=~"{instance}",fstype!~"tmpfs|overlay"}/node_filesystem_size_bytes{instance=~"{instance}",fstype!~"tmpfs|overlay"}) * 100'
+        - name: container_oom
+          promql: 'increase(container_oom_events_total{name=~"{container}"}[15m])'
+        - name: jvm_heap
+          promql: 'jvm_memory_used_bytes{area="heap",application="{service}"} / jvm_memory_max_bytes{area="heap",application="{service}"} * 100'
+
+  # --- SSH 主机（严格只读，命令白名单见 security.readonly）---
+  ssh:
+    - id: dev-host
+      name: Dev 主机
+      host: 192.168.11.156
+      port: 22
+      enabled: true
+      username: ${SSH_DEV_USER}
+      # 二选一：password 或 privateKeyPath。推荐密钥。
+      password: ${SSH_DEV_PASSWORD}
+      privateKeyPath: ${SSH_DEV_KEY_PATH}
+      passphrase: ${SSH_DEV_KEY_PASSPHRASE}
+      timeoutMs: 10000
+      # 允许执行的命令前缀（叠加全局白名单，取交集）
+      allowedCommands:
+        - docker ps
+        - docker stats
+        - docker logs
+        - docker inspect
+        - df
+        - free
+        - top
+        - ps
+        - uptime
+        - ss
+        - netstat
+        - journalctl
+
+    - id: app-01
+      name: mg-sz-app-01
+      host: 10.0.0.11
+      port: 22
+      enabled: false
+      username: ${SSH_APP_USER}
+      password: ${SSH_APP_PASSWORD}
+      timeoutMs: 10000
+
+# ---------------------------------------------------------------------------
+# 服务注册表（架构知识层）
+#
+# 这是诊断准确率的关键：让 AI 知道服务名规范、上下游依赖、部署位置、
+# 日志字段怎么映射、已知故障怎么处理。
+#
+# 建议：把现有 Jenkinsfile / docker-compose / Nacos 配置丢给 AI 生成初稿，
+#       再人工校对。详见 docs/knowledge-base.md。
+# ---------------------------------------------------------------------------
+services:
+  - canonicalName: logistics-service
+    displayName: 物流服务
+    aliases: [logistics, migo-logistics, logistics_service, logistics-service]
+    tier: core                      # core | important | edge
+    datasourceId: prod-es
+    indexPatterns: [migo-application-log-prod-*]
+    fieldMapping:
+      timestamp: ['@timestamp', 'timestamp', 'time']
+      level: ['level', 'log.level', 'severity', 'fields.level']
+      message: ['message', 'msg', 'log', 'fields.message']
+      traceId: ['traceId', 'trace_id', 'X-B3-TraceId', 'MDC.traceId']
+      logger: ['logger_name', 'logger', 'class']
+    deployment:
+      hostIds: [dev-host]
+      containerNames: [logistics-service]
+      port: 8080
+      jenkinsJob: logistics-service-deploy
+      registry: 192.168.10.192:5000
+    stack: Spring Boot 3.x + Nacos + Docker
+    dependsOn: [supply-service, nacos, mysql-main, redis-01]
+    dependedBy: [api-gateway, migo-wms-open-api]
+    prometheusLabels:
+      application: logistics-service
+      instance: '192.168.11.156:.*'
+    knownIssues:
+      - pattern: 'HikariPool.*Connection is not available'
+        category: 连接池耗尽
+        severity: high
+        cause: 数据库连接池耗尽，通常由慢 SQL 或流量突增引起
+        sop: |
+          1. 检查慢查询日志，确认是否有全表扫描
+          2. 查看 HikariCP 当前 maxPoolSize 与活跃连接数
+          3. 确认是否流量突增（对比 QPS 指标）
+          4. 必要时临时扩大连接池（需变更审批）
+
+      - pattern: 'NacosException|failed to req API|Client not connected'
+        category: 配置中心异常
+        severity: high
+        cause: Nacos 连接失败或配置拉取超时
+        sop: |
+          1. 确认 Nacos 服务端存活与网络连通性
+          2. 检查服务侧 namespace / group / dataId 配置
+          3. 查看 Nacos 客户端心跳日志
+
+      - pattern: 'java\.lang\.OutOfMemoryError|GC overhead limit exceeded'
+        category: JVM OOM
+        severity: critical
+        cause: 堆内存溢出或 GC 效率过低
+        sop: |
+          1. 确认容器内存限额与 JVM -Xmx 是否匹配
+          2. 导出 heap dump 分析大对象
+          3. 检查是否存在内存泄漏（观察老年代增长趋势）
+          4. 临时缓解：重启容器（需确认非数据库侧问题）
+
+  - canonicalName: supply-service
+    displayName: 供应链服务
+    aliases: [supply, migo-supply, supply_service]
+    tier: core
+    datasourceId: prod-es
+    indexPatterns: [migo-application-log-prod-*]
+    fieldMapping:
+      timestamp: ['@timestamp']
+      level: ['level', 'log.level']
+      message: ['message', 'msg']
+      traceId: ['traceId', 'trace_id']
+    deployment:
+      hostIds: [dev-host]
+      containerNames: [supply-service]
+      port: 8081
+      jenkinsJob: supply-service-deploy
+    stack: Spring Boot + Maven + JDK11
+    dependsOn: [nacos, mysql-main]
+    dependedBy: [logistics-service]
+    knownIssues: []
+
+  - canonicalName: migo-wms-open-api
+    displayName: WMS 开放接口
+    aliases: [wms-open-api, open-api, migo-wms]
+    tier: important
+    datasourceId: prod-es
+    indexPatterns: [migo-wms-open-api*]
+    fieldMapping:
+      timestamp: ['@timestamp']
+      level: ['level', 'fields.level']
+      message: ['message', 'fields.message']
+    deployment:
+      hostIds: []
+      containerNames: [migo-wms-open-api]
+    stack: Spring Boot
+    dependsOn: [logistics-service]
+    dependedBy: [external-wms]
+    knownIssues: []
+
+# ---------------------------------------------------------------------------
+# 安全边界（只读保障，代码层强制，不靠约定）
+# ---------------------------------------------------------------------------
+security:
+  readonly:
+    # SSH 命令白名单：只有匹配前缀的命令才允许执行
+    allowedCommandPrefixes:
+      - docker ps
+      - docker stats
+      - docker logs
+      - docker inspect
+      - docker top
+      - df
+      - du -sh
+      - free
+      - top -bn1
+      - ps
+      - uptime
+      - ss -
+      - netstat -
+      - journalctl
+      - cat /var/log
+      - cat /etc/hosts
+      - tail -n
+      - head -n
+      - wc -l
+      - ls
+      - pwd
+      - hostname
+      - date
+      - whoami
+      - id
+      - vmstat
+      - iostat
+      - sar
+      - dmesg
+      - kubectl get
+      - kubectl describe
+      - kubectl logs
+      - systemctl status
+      - systemctl is-active
+      - nginx -T
+      - java -version
+      - node --version
+
+    # 危险模式：命中即拒绝（优先级高于白名单）
+    blockedPatterns:
+      - '(?i)\brm\b'
+      - '(?i)\bkill\b'
+      - '(?i)\bpkill\b'
+      - '(?i)\bshutdown\b'
+      - '(?i)\breboot\b'
+      - '(?i)\brestart\b'
+      - '(?i)\bstop\b'
+      - '(?i)\bstart\b'
+      - '(?i)\bdrop\b'
+      - '(?i)\bdelete\b'
+      - '(?i)\btruncate\b'
+      - '(?i)\bupdate\b'
+      - '(?i)\binsert\b'
+      - '(?i)\bchmod\b'
+      - '(?i)\bchown\b'
+      - '(?i)\bmkfs\b'
+      - '(?i)\bdd\b'
+      - '(?i)\bsudo\b'
+      - '(?i)\bsu\s'
+      - '(?i)\bcurl\b.*(-X\s*POST|-X\s*PUT|-X\s*DELETE)'
+      - '(?i)\bwget\b'
+      - '[>|]'                      # 任何输出重定向
+      - '&&'                        # 命令链
+      - '\|\|'
+      - ';'
+      - '`'
+      - '\$\('
+      - '(?i)\bnc\b'
+      - '(?i)\bssh\b'
+      - '(?i)\bscp\b'
+      - '(?i)\bmv\b'
+      - '(?i)\bcp\b'
+
+    # 单条 SSH 命令最长输出字节数
+    maxOutputBytes: 262144
+    # SSH 命令超时
+    commandTimeoutMs: 15000
+
+  # 审计日志
+  audit:
+    enabled: true
+    # 记录 AI 建议的命令但不执行；记录所有数据源访问
+    logSuggestedCommands: true
+
+# ---------------------------------------------------------------------------
+# 告警接入（触发层）
+# ---------------------------------------------------------------------------
+alerts:
+  # Alertmanager / 飞书群机器人 webhook 接收
+  webhook:
+    enabled: true
+    path: /api/webhook/alertmanager
+    # 共享密钥，用于校验来源。留空则不校验（仅限内网）。
+    secret: ${AIOPS_WEBHOOK_SECRET}
+    # 收到告警后是否自动触发诊断
+    autoDiagnose: true
+    # 自动诊断的告警级别过滤（低于此级别不自动诊断，只记录）
+    minSeverity: warning        # info | warning | critical
+    # 同一服务在多少秒内重复告警只诊断一次（告警降噪）
+    dedupWindowSeconds: 300
+
+  # 定时扫描
+  scheduler:
+    enabled: false
+    # 每 N 分钟扫一次 error 日志，发现新异常模板则汇总
+    scanIntervalMinutes: 60
+    # 每日结论式日报生成时间（24 小时制，服务器本地时区）
+    dailyReportHour: 8
+    dailyReportMinute: 0
+    # 日报推送目标（飞书群机器人 webhook）
+    reportWebhookUrl: ${FEISHU_BOT_WEBHOOK}
+
+# ---------------------------------------------------------------------------
+# 诊断流水线参数
+# ---------------------------------------------------------------------------
+diagnosis:
+  # 取证时间窗：告警时间点前后各 N 分钟
+  windowBeforeMinutes: 15
+  windowAfterMinutes: 15
+  # 日志压缩：模板提取与聚类
+  compression:
+    # 是否启用 Drain 风格模板提取（日志量小时可关闭以省开发/算力）
+    enabled: true
+    # 模板相似度阈值（0-1，越大越严格）
+    similarityThreshold: 0.5
+    # 送入大模型的模板数上限
+    maxTemplates: 30
+    # 每个模板保留的代表性样本数
+    samplesPerTemplate: 3
+    # 基线对比：统计"正常频率"的历史天数
+    baselineDays: 7
+  # 只输出这些日志级别（降噪）
+  levelFilter: [ERROR, WARN, FATAL]
+  # 单次诊断最多送入大模型的字符数
+  maxContextChars: 120000
+
+# ---------------------------------------------------------------------------
+# 成果度量（谈判弹药，从第一天起内建）
+# ---------------------------------------------------------------------------
+metrics:
+  enabled: true
+  # 人工排障基线耗时（分钟），用于计算 MTTR 降幅。请按你的真实经验填写。
+  manualBaselineMinutes: 30
+  # 是否暴露 Prometheus /metrics 端点（让本系统自身也被监控）
+  exposePrometheus: true
