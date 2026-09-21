@@ -1,0 +1,42 @@
+# =============================================================================
+# AI Ops Platform — Docker Compose
+#
+# 用法：
+#   1. cp config.example.yaml config.yaml 并填入真实配置
+#   2. cp .env.example .env 并填入密钥（API Key / SSH 密码 / Token 等）
+#   3. docker compose up -d --build
+#   4. 浏览器打开 http://<host>:3000
+#
+# 挂载约定：
+#   - ./config.yaml → /app/config/config.yaml:ro （只读挂载，配置不进镜像）
+#   - aiops-data   → /app/data                   （数据库持久化卷）
+# =============================================================================
+
+services:
+  ai-ops:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-ops-platform:1.0.0
+    container_name: ai-ops-platform
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./config.yaml:/app/config/config.yaml:ro
+      - aiops-data:/app/data
+    # 若需访问宿主机上的 ES/Prometheus（Linux 宿主机），取消下一行注释：
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  aiops-data:
+    driver: local

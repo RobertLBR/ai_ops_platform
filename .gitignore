@@ -5,6 +5,7 @@ web/node_modules/
 # build output
 dist/
 web/dist/
+*.tsbuildinfo
 
 # runtime data & real config (NEVER commit)
 data/

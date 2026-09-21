@@ -1,36 +1,35 @@
 {
   "name": "ai-ops-platform",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "AI-driven read-only operations diagnosis platform for log and metric troubleshooting",
-  "license": "MIT",
+  "description": "AI 自动化运维系统 — 只读诊断型 AIOps 平台，告警驱动自动根因分析",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "install:all": "npm install",
+    "build": "npm run build --workspace=server && npm run build --workspace=web",
+    "build:server": "npm run build --workspace=server",
+    "build:web": "npm run build --workspace=web",
+    "dev": "npm run dev --workspace=server",
+    "dev:web": "npm run dev --workspace=web",
+    "start": "npm run start --workspace=server",
+    "typecheck": "npm run typecheck --workspace=server",
+    "probe": "node scripts/probe-connectivity.mjs",
+    "clean": "node -e \"const fs=require('fs');for(const p of ['server/dist','web/dist'])fs.rmSync(p,{recursive:true,force:true})\""
+  },
   "engines": {
     "node": ">=22.5.0"
   },
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "node --disable-warning=ExperimentalWarning dist/server.js",
-    "dev": "ts-node-dev --respawn --transpile-only server/src/server.ts",
-    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "web:install": "npm --prefix web install",
-    "web:dev": "npm --prefix web run dev",
-    "web:build": "npm --prefix web run build",
-    "web:typecheck": "npm --prefix web run typecheck",
-    "all:build": "npm run build && npm run web:build",
-    "doctor": "node --disable-warning=ExperimentalWarning dist/scripts/doctor.js"
-  },
-  "dependencies": {
-    "express": "^4.21.2",
-    "ssh2": "^1.16.0",
-    "yaml": "^2.6.1",
-    "zod": "^3.24.1"
-  },
-  "devDependencies": {
-    "@types/express": "^4.17.21",
-    "@types/node": "^22.10.2",
-    "@types/ssh2": "^1.15.1",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^5.7.2"
-  }
+  "license": "MIT",
+  "keywords": [
+    "aiops",
+    "observability",
+    "root-cause-analysis",
+    "elasticsearch",
+    "prometheus",
+    "llm",
+    "sre"
+  ]
 }
