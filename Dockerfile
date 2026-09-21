@@ -59,9 +59,10 @@ RUN apt-get update \
  && echo $TZ > /etc/timezone \
  && rm -rf /var/lib/apt/lists/*
 
-# 从 builder 拷贝生产依赖与编译产物
+# 从 builder 拷贝生产依赖与编译产物。
+# 注意：npm workspaces 会把依赖 hoist 到根 node_modules，因此只需拷贝根 node_modules
+#       （express/ssh2/yaml/zod 都在这里），不存在 server/node_modules，不要试图拷贝它。
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/server/node_modules ./server/node_modules
 COPY --from=builder /app/server/dist ./server/dist
 COPY --from=builder /app/server/package.json ./server/package.json
 COPY --from=builder /app/web/dist ./web/dist
