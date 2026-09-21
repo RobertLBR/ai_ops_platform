@@ -19,6 +19,24 @@ import { LlmRouter } from '../ai/llm-router';
 import { httpRequest } from '../datasources/http';
 import { logger } from '../utils/logger';
 
+/**
+ * 校验飞书 webhook 的业务返回码。
+ *
+ * 关键：飞书机器人「关键词不匹配」「签名错误」等情况返回的 HTTP 状态码仍是 200，
+ * 只把错误放在响应体里（如 {"code":19024,"msg":"Key Words Not Found"}）。
+ * 若不检查响应体，会把推送失败误报为成功。
+ */
+function assertFeishuOk(resp: unknown): void {
+  if (!resp || typeof resp !== 'object') return;
+  const r = resp as Record<string, unknown>;
+  const raw = r.code ?? r.StatusCode;
+  if (raw === undefined || raw === null) return; // 兼容不返回码的版本
+  const code = Number(raw);
+  if (Number.isNaN(code) || code === 0) return;
+  const msg = String(r.msg ?? r.StatusMessage ?? 'unknown');
+  throw new Error(`飞书返回业务错误 code=${code} msg=${msg}（19024 = 自定义关键词不匹配）`);
+}
+
 export class Scheduler {
   private scanTimer: NodeJS.Timeout | null = null;
   private dailyTimer: NodeJS.Timeout | null = null;
@@ -112,8 +130,10 @@ export class Scheduler {
             // 只有发现新模式或判定为 critical/warning 才推送，避免噪音
             if (newPatterns > 0 || task.conclusion.severity === 'critical' || task.conclusion.severity === 'warning') {
               triggered++;
+              // 标题必须含「告警」：飞书自定义机器人若启用了「自定义关键词」校验，
+              // 消息中不含关键词会被直接拒收（错误码 19024）。改动文案时请保留。
               await this.pushAlertCard(
-                `定时巡检发现异常：${svc.canonicalName}`,
+                `【告警】定时巡检发现异常：${svc.canonicalName}`,
                 task.conclusion.summary,
                 task.id,
                 task.conclusion.severity,
@@ -201,7 +221,8 @@ export class Scheduler {
         `累计节省人工 ${summary.speed?.savedHours ?? 0} 小时，结论有用率 ${summary.accuracy?.usefulRate ?? 'N/A'}%。`;
     }
 
-    const text = `【AI 运维日报】${new Date().toISOString().slice(0, 10)}\n\n${narrative}`;
+    // 标题含「告警」：飞书自定义机器人的「自定义关键词」校验要求消息含关键词，否则拒收
+    const text = `【AI 运维告警日报】${new Date().toISOString().slice(0, 10)}\n\n${narrative}`;
 
     // 推送
     const url = this.config.alerts.scheduler.reportWebhookUrl;
@@ -246,26 +267,29 @@ export class Scheduler {
         },
         elements: [
           { tag: 'div', text: { tag: 'lark_md', content: summary } },
-          { tag: 'note', elements: [{ tag: 'plain_text', content: `诊断任务 ${taskId}｜严重级别 ${severity}` }] },
+          { tag: 'note', elements: [{ tag: 'plain_text', content: `告警级别 ${severity}｜诊断任务 ${taskId}` }] },
         ],
       },
     };
 
     try {
-      await httpRequest(url, { method: 'POST', body: payload, timeoutMs: 10000 });
+      const resp = await httpRequest(url, { method: 'POST', body: payload, timeoutMs: 10000 });
+      assertFeishuOk(resp);
+      logger.info('告警卡片已推送', { taskId, severity, title });
     } catch (e) {
-      logger.warn('推送告警卡片失败', { error: (e as Error).message });
+      logger.warn('推送告警卡片失败', { error: (e as Error).message, title });
     }
   }
 
   /** 推送飞书纯文本。 */
   private async pushFeishuText(url: string, text: string): Promise<void> {
     try {
-      await httpRequest(url, {
+      const resp = await httpRequest(url, {
         method: 'POST',
         body: { msg_type: 'text', content: { text } },
         timeoutMs: 10000,
       });
+      assertFeishuOk(resp);
       logger.info('日报已推送');
     } catch (e) {
       logger.warn('日报推送失败', { error: (e as Error).message });
