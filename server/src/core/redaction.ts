@@ -57,6 +57,86 @@ export function normalizePatternFlags(pattern: string, flags: string): { pattern
  * 编译后的脱敏器。编译一次、复用多次（正则编译有成本，
  * 诊断流水线一次会脱敏几十条文本）。
  */
+/**
+ * 手动展开替换串中的 `$` 引用。
+ *
+ * 必须手动做：`String.replace(regex, fn)` 的**函数式**替换不会自动展开 `$1`，
+ * 它会把 `$1` 当字面量返回。而我们需要函数式替换来统计命中次数（审计用）。
+ * 所以这里复刻 String.replace 的 `$` 语义。
+ *
+ * 支持：`$$`(字面$) `$&`(整个匹配) `$`` `(前缀) `$'`(后缀) `$1`-`$99`(捕获组) `$<name>`(命名组)
+ */
+function expandReplacement(
+  template: string,
+  match: string,
+  args: unknown[],
+  offset: number,
+  whole: string,
+): string {
+  // args 布局：[match, ...captureGroups, offset, wholeString, (namedGroups?)]
+  const last = args[args.length - 1];
+  const hasNamed = !!last && typeof last === 'object';
+  const groupsEnd = hasNamed ? args.length - 3 : args.length - 2;
+  // 捕获组从索引 1 开始（索引 0 是整个匹配）
+  const groups = args.slice(1, groupsEnd) as (string | undefined)[];
+  const named = hasNamed ? last : undefined;
+  let out = '';
+
+  for (let i = 0; i < template.length; i++) {
+    const ch = template[i];
+    if (ch !== '$') {
+      out += ch;
+      continue;
+    }
+    const next = template[i + 1];
+
+    if (next === '$') {
+      out += '$';
+      i++;
+    } else if (next === '&') {
+      out += match;
+      i++;
+    } else if (next === '`') {
+      out += whole.slice(0, offset);
+      i++;
+    } else if (next === "'") {
+      out += whole.slice(offset + match.length);
+      i++;
+    } else if (next === '<' && named && typeof named === 'object') {
+      const close = template.indexOf('>', i + 2);
+      if (close > 0) {
+        const name = template.slice(i + 2, close);
+        const val = (named as Record<string, string | undefined>)[name];
+        out += val ?? '';
+        i = close;
+      } else {
+        out += '$';
+      }
+    } else if (next && next >= '1' && next <= '9') {
+      // 贪婪匹配两位数组号（$10 优先于 $1 + '0'）
+      let idx = parseInt(next, 10);
+      let consumed = 1;
+      const two = template.slice(i + 1, i + 3);
+      if (/^\d\d$/.test(two)) {
+        const idx2 = parseInt(two, 10);
+        if (idx2 >= 1 && idx2 <= groups.length) {
+          idx = idx2;
+          consumed = 2;
+        }
+      }
+      if (idx >= 1 && idx <= groups.length) {
+        out += groups[idx - 1] ?? '';
+        i += consumed;
+      } else {
+        out += '$'; // 不存在的组号，保留字面 $
+      }
+    } else {
+      out += '$';
+    }
+  }
+  return out;
+}
+
 export class Redactor {
   private readonly rules: CompiledRule[] = [];
   private readonly enabled: boolean;
@@ -74,9 +154,10 @@ export class Redactor {
     for (const r of rules) {
       if (!r.enabled) continue;
       try {
-        // flags 去重（'g' 重复会抛错）
-        const flags = [...new Set(r.flags.split(''))].join('');
-        const regex = new RegExp(r.pattern, flags.includes('g') ? flags : flags + 'g');
+        // 归一化：把 PCRE/Java 风格内联标志 (?i) 转成 JS 标志；并保证带 g
+        const norm = normalizePatternFlags(r.pattern, r.flags ?? 'g');
+        const flags = norm.flags.includes('g') ? norm.flags : norm.flags + 'g';
+        const regex = new RegExp(norm.pattern, flags);
         this.rules.push({ name: r.name, regex, replacement: r.replacement });
       } catch (e) {
         // 单条规则写错不该让整个系统起不来
@@ -113,10 +194,17 @@ export class Redactor {
       // 每次使用前重置 lastIndex（带 g 标志的正则有状态）
       rule.regex.lastIndex = 0;
       let count = 0;
-      out = out.replace(rule.regex, (...args) => {
+      // 固定源串：replace 回调执行期间 out 尚未被重新赋值，显式捕获更安全
+      const source = out;
+      // 函数式替换：便于计数；$ 组引用由 expandReplacement 手动展开
+      out = source.replace(rule.regex, (...args: unknown[]) => {
         count++;
-        // replacement 里的 $1 $2 由 String.replace 原生处理
-        return rule.replacement;
+        const match = String(args[0] ?? '');
+        const last = args[args.length - 1];
+        const hasNamed = !!last && typeof last === 'object';
+        // args 布局：[match, ...groups, offset, whole, (named?)]
+        const offset = Number(hasNamed ? args[args.length - 3] : args[args.length - 2]);
+        return expandReplacement(rule.replacement, match, args, offset, source);
       });
       if (count > 0 && this.auditEnabled) {
         auditMap.set(rule.name, (auditMap.get(rule.name) ?? 0) + count);
