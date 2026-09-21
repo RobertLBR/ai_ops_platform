@@ -1,0 +1,43 @@
+# dependencies
+node_modules/
+web/node_modules/
+
+# build output
+dist/
+web/dist/
+
+# runtime data & real config (NEVER commit)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+config.yaml
+config.local.yaml
+config/*.yaml
+!config.example.yaml
+!config/*.example.yaml
+
+# secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# logs
+logs/
+*.log
+npm-debug.log*
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# coverage
+coverage/
