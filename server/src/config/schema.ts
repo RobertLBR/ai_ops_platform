@@ -427,7 +427,7 @@ export function resolveService(config: AppConfig, input: string): ServiceDef | n
     if (s.canonicalName.toLowerCase().includes(q)) return s;
     if (s.aliases.some((a) => a.toLowerCase().includes(q))) return s;
   }
-  // 反向包含：输入里含有服务名（例如告警文本 "logistics-service is down"）
+  // 反向包含：输入里含有服务名（例如告警文本 "order-service is down"）
   for (const s of config.services) {
     if (q.includes(s.canonicalName.toLowerCase())) return s;
     for (const a of s.aliases) {

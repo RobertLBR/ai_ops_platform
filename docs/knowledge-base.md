@@ -4,7 +4,7 @@
 
 ## 为什么这张表决定诊断质量
 
-AI 拿到一条错误日志，本身并不知道"logistics-service 是什么、它跑在哪、
+AI 拿到一条错误日志，本身并不知道"order-service 是什么、它跑在哪、
 它挂了会影响谁、这个报错历史上怎么修的"。这些信息全靠 `config.yaml` 的
 `services` 段提供。这张表填得越全，AI 越像"熟悉你系统的老运维"；
 填得草率，AI 就只能给通用、空泛的结论。
@@ -13,20 +13,20 @@ AI 拿到一条错误日志，本身并不知道"logistics-service 是什么、�
 
 ## 字段逐项说明
 
-以 `logistics-service` 为例：
+以 `order-service` 为例：
 
 ```yaml
 services:
-  - canonicalName: logistics-service     # 规范名（唯一键，AI 输出的名字）
-    displayName: 物流服务                 # 展示名
-    aliases: [logistics, migo-logistics] # 别名（关键！见下）
+  - canonicalName: order-service         # 规范名（唯一键，AI 输出的名字）
+    displayName: 订单服务                 # 展示名
+    aliases: [order, order-svc]           # 别名（关键！见下）
     tier: core                            # core | important | edge
     datasourceId: prod-es                 # 日志从哪个 ES 数据源查
-    indexPatterns: [migo-application-log-prod-*]
+    indexPatterns: [app-log-prod-*]
     fieldMapping: { ... }                 # 日志字段映射
     deployment: { ... }                   # 部署位置
     stack: Spring Boot 3.x + Nacos + Docker
-    dependsOn: [supply-service, nacos]    # 上游依赖
+    dependsOn: [payment-service, nacos]   # 上游依赖
     dependedBy: [api-gateway]             # 下游调用方
     prometheusLabels: { ... }             # 指标标签
     knownIssues: [ ... ]                  # 已知故障与 SOP
@@ -34,8 +34,8 @@ services:
 
 ### canonicalName / displayName / aliases
 
-**aliases 是最容易被低估的字段。** 人的提问是口语化的："物流那个服务又报错了"、
-"supply 挂了"。系统靠 aliases 把这些说法映射到规范名。
+**aliases 是最容易被低估的字段。** 人的提问是口语化的："订单那个服务又报错了"、
+"payment 挂了"。系统靠 aliases 把这些说法映射到规范名。
 
 建议把以下来源的所有叫法都塞进 aliases：
 
@@ -64,7 +64,7 @@ K8s 用 `fields.level`）。这里列出候选字段名，系统按顺序探测�
 ### dependsOn / dependedBy
 
 这是**链路定位**的关键。当 `api-gateway` 报超时，AI 可以顺着 `dependsOn`
-往下查 `logistics-service`，而不是只看网关自己的日志。
+往下查 `order-service`，而不是只看网关自己的日志。
 
 填法：本服务的**上游**（我依赖谁）填 `dependsOn`，**下游**（谁依赖我）填 `dependedBy`。
 中间件（nacos/mysql/redis）也算依赖，值得列上——很多"服务假死"其实是中间件问题。

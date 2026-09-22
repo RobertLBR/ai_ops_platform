@@ -47,9 +47,9 @@ ai:
       baseUrl: https://dashscope.aliyuncs.com/compatible-mode/v1
       apiKey: ${DASHSCOPE_API_KEY}
       timeoutMs: 120000
-    # 本地模型示例（Ollama / vLLM），内网无法出公网时启用
+    # 本地/内网推理服务示例（任何 OpenAI 兼容服务均可），无法访问公网时启用
     local:
-      baseUrl: http://127.0.0.1:11434/v1
+      baseUrl: http://localhost:11434/v1
       apiKey: ${LOCAL_LLM_API_KEY}
       timeoutMs: 180000
 
@@ -128,8 +128,8 @@ datasources:
   # --- Elasticsearch 日志源（可配多个：生产、测试）---
   elasticsearch:
     - id: prod-es
-      name: 生产 ES
-      url: http://172.18.136.79:9797
+      name: 生产日志源
+      url: http://es.prod.internal:9200
       enabled: true
       # 建议只读账号；留空表示匿名访问
       username: ${ES_PROD_USERNAME}
@@ -138,29 +138,27 @@ datasources:
       # 单次查询最多拉取的日志行数（硬上限，防止打爆 ES 和内存）
       maxDocs: 20000
       indices:
-        - migo-application-log-prod-*
-        - migo-wms-open-api*
-        - migo-nginx-prod*
+        - app-log-prod-*
+        - api-log-prod-*
+        - nginx-log-prod-*
 
     - id: dev-es
-      name: 开发/测试 ES
-      url: http://192.168.10.120:9797
+      name: 开发/测试日志源
+      url: http://es.dev.internal:9200
       enabled: false
       username: ${ES_DEV_USERNAME}
       password: ${ES_DEV_PASSWORD}
       timeoutMs: 15000
       maxDocs: 20000
       indices:
-        - '*dev*'
-        - '*test*'
-        - '*uat*'
-        - '*pre*'
+        - app-log-dev-*
+        - app-log-test-*
 
   # --- Prometheus 指标源 ---
   prometheus:
     - id: prod-prom
       name: Prometheus
-      url: http://192.168.11.156:9090
+      url: http://prometheus.internal:9090
       enabled: true
       username: ${PROM_USERNAME}
       password: ${PROM_PASSWORD}
@@ -180,9 +178,9 @@ datasources:
 
   # --- SSH 主机（严格只读，命令白名单见 security.readonly）---
   ssh:
-    - id: dev-host
-      name: Dev 主机
-      host: 192.168.11.156
+    - id: app-host-01
+      name: 应用主机 01
+      host: app-host-01.internal
       port: 22
       enabled: true
       username: ${SSH_DEV_USER}
@@ -206,9 +204,9 @@ datasources:
         - netstat
         - journalctl
 
-    - id: app-01
-      name: mg-sz-app-01
-      host: 10.0.0.11
+    - id: app-host-02
+      name: 应用主机 02
+      host: app-host-02.internal
       port: 22
       enabled: false
       username: ${SSH_APP_USER}
@@ -225,12 +223,12 @@ datasources:
 #       再人工校对。详见 docs/knowledge-base.md。
 # ---------------------------------------------------------------------------
 services:
-  - canonicalName: logistics-service
-    displayName: 物流服务
-    aliases: [logistics, migo-logistics, logistics_service, logistics-service]
+  - canonicalName: order-service
+    displayName: 订单服务
+    aliases: [order, order-svc, order_service, order-service]
     tier: core                      # core | important | edge
     datasourceId: prod-es
-    indexPatterns: [migo-application-log-prod-*]
+    indexPatterns: [app-log-prod-*]
     fieldMapping:
       timestamp: ['@timestamp', 'timestamp', 'time']
       level: ['level', 'log.level', 'severity', 'fields.level']
@@ -238,17 +236,17 @@ services:
       traceId: ['traceId', 'trace_id', 'X-B3-TraceId', 'MDC.traceId']
       logger: ['logger_name', 'logger', 'class']
     deployment:
-      hostIds: [dev-host]
-      containerNames: [logistics-service]
+      hostIds: [app-host-01]
+      containerNames: [order-service]
       port: 8080
-      jenkinsJob: logistics-service-deploy
-      registry: 192.168.10.192:5000
+      jenkinsJob: order-service-deploy
+      registry: registry.internal:5000
     stack: Spring Boot 3.x + Nacos + Docker
-    dependsOn: [supply-service, nacos, mysql-main, redis-01]
-    dependedBy: [api-gateway, migo-wms-open-api]
+    dependsOn: [payment-service, nacos, mysql-main, redis-01]
+    dependedBy: [api-gateway, partner-api]
     prometheusLabels:
-      application: logistics-service
-      instance: '192.168.11.156:.*'
+      application: order-service
+      instance: 'app-host-01.internal:.*'
     knownIssues:
       - pattern: 'HikariPool.*Connection is not available'
         category: 连接池耗尽
@@ -279,43 +277,43 @@ services:
           3. 检查是否存在内存泄漏（观察老年代增长趋势）
           4. 临时缓解：重启容器（需确认非数据库侧问题）
 
-  - canonicalName: supply-service
-    displayName: 供应链服务
-    aliases: [supply, migo-supply, supply_service]
+  - canonicalName: payment-service
+    displayName: 支付服务
+    aliases: [payment, payment-svc, payment_service]
     tier: core
     datasourceId: prod-es
-    indexPatterns: [migo-application-log-prod-*]
+    indexPatterns: [app-log-prod-*]
     fieldMapping:
       timestamp: ['@timestamp']
       level: ['level', 'log.level']
       message: ['message', 'msg']
       traceId: ['traceId', 'trace_id']
     deployment:
-      hostIds: [dev-host]
-      containerNames: [supply-service]
+      hostIds: [app-host-01]
+      containerNames: [payment-service]
       port: 8081
-      jenkinsJob: supply-service-deploy
-    stack: Spring Boot + Maven + JDK11
+      jenkinsJob: payment-service-deploy
+    stack: Spring Boot + Maven + JDK17
     dependsOn: [nacos, mysql-main]
-    dependedBy: [logistics-service]
+    dependedBy: [order-service]
     knownIssues: []
 
-  - canonicalName: migo-wms-open-api
-    displayName: WMS 开放接口
-    aliases: [wms-open-api, open-api, migo-wms]
+  - canonicalName: partner-api
+    displayName: 合作方开放接口
+    aliases: [partner-api, open-api, gateway-api]
     tier: important
     datasourceId: prod-es
-    indexPatterns: [migo-wms-open-api*]
+    indexPatterns: [api-log-prod-*]
     fieldMapping:
       timestamp: ['@timestamp']
       level: ['level', 'fields.level']
       message: ['message', 'fields.message']
     deployment:
       hostIds: []
-      containerNames: [migo-wms-open-api]
+      containerNames: [partner-api]
     stack: Spring Boot
-    dependsOn: [logistics-service]
-    dependedBy: [external-wms]
+    dependsOn: [order-service]
+    dependedBy: [external-partner]
     knownIssues: []
 
 # ---------------------------------------------------------------------------
