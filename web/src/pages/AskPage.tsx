@@ -152,7 +152,7 @@ export default function AskPage({ onUnauthorized, onCreated }: Props) {
               onChange={(e) => setQuestion(e.target.value)}
               placeholder={
                 '例如：\n' +
-                '· logistics-service 今早 9 点开始一直报 timeout\n' +
+                '· order-service 今早 9 点开始一直报 timeout\n' +
                 '· 直接粘贴告警群里的告警内容也可以，系统会自动识别服务名\n' +
                 '· 容器反复重启，怀疑 OOM'
               }
