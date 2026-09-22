@@ -165,6 +165,7 @@ AI 建议的命令仅展示，代码中不存在"执行模型输出"的路径；
 |---|---|
 | 📘 [详细配置](docs/configuration.md) | `config.yaml` 逐段说明、环境变量、接口一览、常见配置坑 |
 | 📗 [服务注册表编写指南](docs/knowledge-base.md) | 决定诊断准不准的那张表怎么填 |
+| 📈 [项目进度](docs/progress.md) | 一期完成情况、验证记录、已知问题与二期规划 |
 | 📄 [安全说明](docs/configuration.md#security--安全配置) | 只读白名单、脱敏规则、部署建议 |
 
 ---
