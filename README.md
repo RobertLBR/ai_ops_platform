@@ -1,11 +1,33 @@
-# 🤖 AI Ops Platform — AI 自动化运维系统
+# 🤖 AI Ops Platform — AI 自动化运维诊断平台
 
-> **只读诊断型 AIOps 平台**：把「ES 日志 + Prometheus 指标 + 架构知识」喂给大模型，
+> **只读诊断型 AIOps 平台**：把「日志 + 指标 + 架构知识」喂给大模型，
 > 自动给出**可追溯的根因分析**，而不是又一个需要人盯着看的监控大屏。
 
 [![Node](https://img.shields.io/badge/node-%3E%3D22.5-339933)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6)](https://www.typescriptlang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+---
+
+## 目录
+
+- [这是什么](#-这是什么)
+- [核心特性](#-核心特性)
+- [架构](#️-架构)
+- [目录结构](#-目录结构)
+- [快速开始](#-快速开始)
+- [配置说明](#️-配置说明)
+- [API 文档](#-api-文档)
+- [Web 工作台](#️-web-工作台)
+- [安全说明](#-安全说明)
+- [常见问题](#️-常见问题)
+- [路线图](#️-路线图)
+- [贡献](#-贡献)
+- [许可证](#-许可证)
+
+> 📌 **文档约定**：本文档中所有主机地址、端口、索引名、服务名均为**示意占位符**
+> （如 `<es-host>`、`app-log-prod-*`、`order-service`），请替换为你的真实环境信息。
+> 真实环境配置请放在 `config.yaml` 中，该文件已在 `.gitignore` 中排除，不会入库。
 
 ---
 
@@ -69,7 +91,12 @@
 ### 📊 成果度量（从第一天起积累）
 
 内置「省了多少工时 / 结论有用率 / 告警降噪率」三个可量化指标，
-数据从上线第一天开始积累——**汇报和谈判时不用临时编**。
+数据从上线第一天开始积累——**汇报和复盘时不用临时编**。
+
+### 🧠 知识沉淀闭环
+
+真实排障结论可沉淀为 `knownIssues`（故障模式 + 原因 + SOP）。下次同类日志出现时，
+系统用正则直接命中并注入 SOP，模型会引用它作答——**系统越用越准**。
 
 ---
 
@@ -122,7 +149,7 @@
 | 前端 | React 18 + antd 5 + Vite | 配置驱动表格，改动成本低 |
 | 存储 | `node:sqlite`（Node 22 内置） | **零原生依赖**，镜像干净、构建稳 |
 | 数据源 | 原生 `fetch` / `ssh2` | 不引重量级 SDK，减少攻击面 |
-| AI | OpenAI 兼容协议 | DeepSeek / 通义千问 / 本地 vLLM 均可 |
+| AI | OpenAI 兼容协议 | 公有云网关 / 自建推理服务均可 |
 | 部署 | Docker 多阶段构建 | 单镜像，配置挂载 |
 
 > **为什么用 `node:sqlite` 而不是 PostgreSQL？**
@@ -151,7 +178,7 @@ ai_ops_platform/
 │       │   └── prompts.ts           # 提示词与结论结构化
 │       ├── datasources/
 │       │   ├── http.ts              # fetch 封装（超时/认证）
-│       │   ├── elasticsearch.ts     # ES 只读查询
+│       │   ├── elasticsearch.ts     # ES 只读查询 + 字段归一化
 │       │   ├── prometheus.ts        # PromQL 查询
 │       │   └── ssh.ts               # SSH 只读执行 + 命令白名单
 │       ├── api/
@@ -164,8 +191,8 @@ ai_ops_platform/
 │       ├── App.tsx                  # 布局 + 导航
 │       ├── api/{client,types}.ts    # API 客户端与类型
 │       ├── hooks/useApi.ts          # 统一 loading/error/401 处理
-│       └── pages/                   # 六个页面
-├── scripts/probe-connectivity.mjs   # 部署前连通性自检
+│       └── pages/                   # 七个页面
+├── scripts/probe-connectivity.mjs   # 部署前连通性自检（只读探测）
 ├── docs/knowledge-base.md           # 服务注册表编写指南
 ├── config.example.yaml              # 配置样例（复制为 config.yaml）
 ├── .env.example                     # 环境变量样例（复制为 .env）
@@ -181,7 +208,7 @@ ai_ops_platform/
 
 - **Node.js ≥ 22.5.0**（`node:sqlite` 需要；用 `node -v` 确认）
 - 可访问的 Elasticsearch / Prometheus（可选，用于真实诊断）
-- 一个大模型 API Key（DeepSeek / 通义千问 / 自建均可）
+- 一个大模型 API Key，或一个自建的 OpenAI 兼容服务
 
 ### 方式一：本地开发
 
@@ -190,13 +217,13 @@ ai_ops_platform/
 npm install
 
 # 2. 准备配置
-cp config.example.yaml config.yaml     # 填入你的 ES / Prometheus / 服务注册表
+cp config.example.yaml config.yaml     # 填入你的日志源 / 指标源 / 服务注册表
 cp .env.example .env                   # 填入 API Key 等密钥
 
-# 3. 自检：确认能否访问到配置里的数据源
+# 3. 自检：确认能否访问到配置里的数据源（只读探测，不改任何东西）
 npm run probe
 
-# 4. 同时起前后端（后端 3000，前端 5173，已配代理）
+# 4. 同时起前后端（后端默认 3000，前端 5173，已配代理）
 npm run dev            # 终端 A：后端
 npm run dev:web        # 终端 B：前端 → 打开 http://127.0.0.1:5173
 ```
@@ -208,7 +235,7 @@ npm run build          # 编译后端 + 构建前端
 npm start              # 后端托管前端，打开 http://127.0.0.1:3000
 ```
 
-### 方式三：Docker 部署（推荐用于 Linux 服务器）⭐
+### 方式三：Docker Compose 部署（推荐用于 Linux 服务器）⭐
 
 ```bash
 # 1. 准备配置与密钥
@@ -223,7 +250,7 @@ docker compose ps
 docker compose logs -f ai-ops
 
 # 4. 访问
-#    http://<服务器IP>:3000
+#    http://<server-host>:3000
 ```
 
 ### 方式四：手工构建镜像并推送到私有仓库
@@ -233,21 +260,25 @@ docker compose logs -f ai-ops
 docker build -t ai-ops-platform:1.0.0 .
 
 # 打标签并推送到你的私有仓库
-docker tag ai-ops-platform:1.0.0 192.168.10.192:5000/ai-ops-platform:1.0.0
-docker push 192.168.10.192:5000/ai-ops-platform:1.0.0
+docker tag ai-ops-platform:1.0.0 <your-registry>:5000/ai-ops-platform:1.0.0
+docker push <your-registry>:5000/ai-ops-platform:1.0.0
 
 # 在目标服务器上拉取运行
 docker run -d --name ai-ops \
   -p 3000:3000 \
-  -v /data/ai_ops_platform/config.yaml:/app/config/config.yaml:ro \
-  -v /data/ai_ops_platform/data:/app/data \
-  --env-file /data/ai_ops_platform/.env \
+  -v /opt/ai-ops-platform/config.yaml:/app/config/config.yaml:ro \
+  -v /opt/ai-ops-platform/data:/app/data \
+  --env-file /opt/ai-ops-platform/.env \
   --restart unless-stopped \
-  192.168.10.192:5000/ai-ops-platform:1.0.0
+  <your-registry>:5000/ai-ops-platform:1.0.0
 ```
 
 > **离线环境提示**：若服务器无法访问 Docker Hub，请在有网机器上构建后
 > `docker save` 成 tar 包，传到目标机 `docker load` 导入。
+
+> **数据目录权限提示**：镜像内 `/app/data` 的属主是非 root 的 `aiops` 用户。
+> 用 **命名卷**（如上例之外的 `-v aiops-data:/app/data`）会自动继承属主；
+> 若挂载宿主机目录，需先 `chown` 成对应 uid，否则 SQLite 无法写入。
 
 ---
 
@@ -270,7 +301,7 @@ docker run -d --name ai-ops \
 | `datasources` | ES / Prometheus / SSH 三种数据源 | ✅（诊断需） |
 | `services` | **服务注册表**：别名、索引、依赖、已知问题 | ✅（准确率关键） |
 | `security` | 只读命令白名单、危险模式黑名单、审计 | ✅ |
-| `alerts` | Webhook 接入、降噪窗口、定时巡检 | 可选 |
+| `alerts` | 入站 Webhook、推送地址、定时巡检 | 可选 |
 | `diagnosis` | 取证时间窗、压缩参数、级别过滤 | 可选 |
 | `metrics` | 人工基线耗时、是否暴露 Prometheus 指标 | 可选 |
 
@@ -281,8 +312,8 @@ docker run -d --name ai-ops \
 ```yaml
 ai:
   providers:
-    deepseek:
-      apiKey: ${DEEPSEEK_API_KEY}    # ← 从 .env 读取
+    main:
+      apiKey: ${LLM_API_KEY}    # ← 从 .env 读取
 ```
 
 未设置的环境变量会被替换为空字符串，启动日志会列出警告清单。
@@ -300,16 +331,20 @@ server:
 database:
   path: data/aiops.db
 
+# ---------------------------------------------------------------------------
+# AI：任意 OpenAI 兼容服务。baseUrl 只填到 /v1，程序会自动拼 /chat/completions
+# ---------------------------------------------------------------------------
 ai:
   providers:
-    deepseek:
-      baseUrl: https://api.deepseek.com/v1
-      apiKey: ${DEEPSEEK_API_KEY}
+    main:
+      baseUrl: https://<llm-endpoint>/v1
+      apiKey: ${LLM_API_KEY}
       timeoutMs: 120000
+  # 分级路由：重推理 / 轻量清洗 / 报告生成 可分别指向不同模型以控成本
   routing:
-    reasoning: { provider: deepseek, model: deepseek-chat, temperature: 0.1, maxTokens: 4000 }
-    light:     { provider: deepseek, model: deepseek-chat, temperature: 0.0, maxTokens: 1000 }
-    report:    { provider: deepseek, model: deepseek-chat, temperature: 0.2, maxTokens: 6000 }
+    reasoning: { provider: main, model: <model-name>, temperature: 0.1, maxTokens: 8000 }
+    light:     { provider: main, model: <model-name>, temperature: 0.0, maxTokens: 2000 }
+    report:    { provider: main, model: <model-name>, temperature: 0.2, maxTokens: 6000 }
   limits: { maxInputTokens: 60000, maxRetries: 2, cacheTtlSeconds: 600 }
   redaction:
     enabled: true
@@ -320,33 +355,48 @@ ai:
         pattern: '(?<!\d)1[3-9]\d{9}(?!\d)'
         replacement: '<PHONE>'
 
+# ---------------------------------------------------------------------------
+# 数据源：三种均为只读
+# ---------------------------------------------------------------------------
 datasources:
   elasticsearch:
     - id: prod-es
-      name: 生产 ES
-      url: http://172.18.136.79:9797
+      name: 生产日志源
+      url: http://<es-host>:9200
       enabled: true
-      username: ${ES_PROD_USERNAME}
-      password: ${ES_PROD_PASSWORD}
+      username: ${ES_USERNAME}
+      password: ${ES_PASSWORD}
       timeoutMs: 15000
       maxDocs: 20000
-      indices: ['migo-application-log-prod-*']
+      indices: ['app-log-prod-*']
   prometheus: []
   ssh: []
 
+# ---------------------------------------------------------------------------
+# 服务注册表：这张表决定诊断准不准，务必认真填
+# ---------------------------------------------------------------------------
 services:
-  - canonicalName: logistics-service
-    displayName: 物流服务
-    aliases: [logistics, migo-logistics]
-    tier: core
+  - canonicalName: order-service
+    displayName: 订单服务
+    aliases: [order, order-svc]            # 把同事的口头叫法都列上
+    tier: core                             # core | important | edge
     datasourceId: prod-es
-    indexPatterns: ['migo-application-log-prod-*']
+    indexPatterns: ['app-log-prod-*']
+    fieldMapping:                          # 不同框架字段名不一致时在此归一化
+      timestamp: ['@timestamp', 'timestamp', 'time']
+      level: ['level', 'log.level', 'fields.level']
+      message: ['message', 'msg']
+      traceId: ['traceId', 'trace_id']
+      logger: ['logger_name', 'logger', 'class']
     stack: Spring Boot 3.x + Nacos + Docker
-    dependsOn: [supply-service, nacos]
-    dependedBy: [api-gateway]
-    deployment: { hostIds: [dev-host], containerNames: [logistics-service], port: 8080 }
-    knownIssues: []
+    dependsOn: [payment-service, nacos]    # 我依赖谁（上游）
+    dependedBy: [api-gateway]              # 谁依赖我（下游）
+    deployment: { hostIds: [app-host-01], containerNames: [order-service], port: 8080 }
+    knownIssues: []                        # 历史故障模式 + SOP，越丰富越准
 
+# ---------------------------------------------------------------------------
+# 安全：只读边界（三重校验）
+# ---------------------------------------------------------------------------
 security:
   readonly:
     allowedCommandPrefixes: [docker ps, docker logs, tail -n, df, free, ps, uptime, cat /var/log]
@@ -358,6 +408,14 @@ security:
 
 > 📘 **服务注册表怎么填**？见 [`docs/knowledge-base.md`](docs/knowledge-base.md)——
 > 这直接决定诊断准不准，强烈建议先读。
+
+### 两个容易踩的配置坑
+
+1. **日志没有独立的 level 字段时，`diagnosis.levelFilter` 必须留空 `[]`**。
+   否则会按 level 字段做 terms 查询，字段不存在就捞不到任何日志。
+   级别若写在 `message` 文本里，程序会从消息中兜底解析。
+2. **推理模型的 `maxTokens` 要给足**。思考过程也计入 completion tokens，
+   给小了会出现 JSON 被截断（`Unterminated string`）导致解析失败。
 
 ---
 
@@ -381,17 +439,17 @@ security:
 | GET | `/api/diagnoses` | 诊断列表（`limit` `offset` `status` `service`） | ✅ |
 | GET | `/api/diagnoses/:id` | 诊断详情（含模板/指标/结论/审计） | ✅ |
 | POST | `/api/diagnoses` | **发起诊断**（同步返回，约 15~60s） | ✅ |
-| POST | `/api/diagnoses/:id/feedback` | 人工反馈（`verdict`+`comment`） | ✅ |
+| POST | `/api/diagnoses/:id/feedback` | 人工反馈（`verdict` + `comment`） | ✅ |
 | POST | `/api/diagnoses/:id/promote-to-case` | 沉淀为案例 | ✅ |
 
 发起诊断请求体：
 
 ```json
 {
-  "question": "物流服务昨天下午开始大量报 HikariPool 连接不可用",
-  "serviceName": "logistics-service",
-  "timeFrom": "2026-09-20T14:00:00Z",
-  "timeTo": "2026-09-20T15:00:00Z"
+  "question": "订单服务昨天下午开始大量报连接池不可用",
+  "serviceName": "order-service",
+  "timeFrom": "2026-01-01T14:00:00Z",
+  "timeTo": "2026-01-01T15:00:00Z"
 }
 ```
 
@@ -416,13 +474,13 @@ security:
 
 配置了 `alerts.webhook.secret` 后，请求需带 `X-Webhook-Secret: <secret>` 头或 `?secret=` 参数。
 
-**Alertmanager 接入示例**（注意 `webhook_configs` 无法自定义任意 header，用 query 传密钥）：
+**Alertmanager 接入示例**（`webhook_configs` 无法自定义任意 header，改用 query 传密钥）：
 
 ```yaml
 receivers:
   - name: 'ai-ops'
     webhook_configs:
-      - url: 'http://<host>:3000/api/webhook/alertmanager?secret=<your-secret>'
+      - url: 'http://<server-host>:3000/api/webhook/alertmanager?secret=<your-secret>'
         send_resolved: true
 ```
 
@@ -445,13 +503,22 @@ curl -X POST http://localhost:3000/api/security/check-command \
 
 | 页面 | 作用 |
 |---|---|
-| 📊 **成果看板** | 节省工时 / 结论有用率 / 告警降噪率——汇报与谈判弹药 |
+| 📊 **成果看板** | 节省工时 / 结论有用率 / 告警降噪率 |
 | 💬 **发起诊断** | 提问 + 选服务 + 时间窗，实时进度 |
 | 📋 **诊断记录** | 历史诊断列表，可筛选、可跳转详情 |
 | 🔍 **诊断详情** | 事实/推断分离展示，只读命令区，反馈与案例沉淀 |
 | 🗂️ **服务注册表** | 注册服务、依赖关系、已知问题 + 数据源连通性 |
 | 🚨 **告警流水** | 入站告警，已关联诊断可一键跳转 |
 | 🔐 **审计日志** | 只读边界证据，含动作类型图例 |
+
+### 出站推送（飞书 / 企微机器人）
+
+配置 `alerts.scheduler.reportWebhookUrl` 后，巡检告警卡片与日报会推送到群机器人。
+
+> ⚠️ **飞书自定义机器人的「自定义关键词」校验**：若机器人启用了关键词校验，
+> 推送消息**必须包含关键词**，否则飞书会以 `code=19024 Key Words Not Found` 拒收
+> （注意此时 **HTTP 状态码仍是 200**，只看状态码会把失败当成功）。
+> 本项目的推送文案已内置「告警」字样以通过校验，修改文案时请勿删除。
 
 ---
 
@@ -479,14 +546,15 @@ curl -X POST http://localhost:3000/api/security/check-command \
 
 - 脱敏在**压缩之前**执行，保证模板里也不含敏感信息
 - 审计记录**只有规则名与命中次数**，不含原值
-- 如需更严格，可把 `ip_address` 规则改为 `enabled: true`（内网 IP 也脱敏）
+- 如需更严格，可把内网 IP 也纳入脱敏规则（`ip_address`）
 
-### 建议
+### 部署建议
 
-- 生产环境**务必设置** `server.apiToken`
+- 对外暴露时**务必设置** `server.apiToken`
 - ES 使用**只读账号**，不要给写权限
 - SSH 优先用**密钥**，且该密钥只授权只读命令
 - 镜像以 **非 root 用户** 运行（Dockerfile 已内置 `aiops` 用户）
+- 密钥走环境变量或 Secret 管理，不要写进 `config.yaml` 后入库
 
 ---
 
@@ -504,7 +572,7 @@ curl -X POST http://localhost:3000/api/security/check-command \
 
 三种可能：① 时间窗内确实没日志（放宽 `timeFrom/timeTo`）；
 ② 服务名没识别出来（检查 `services[].aliases` 是否覆盖了你的叫法）；
-③ ES 索引模式不对（检查 `indexPatterns` 能否匹配到真实索引）。
+③ 索引模式不对（检查 `indexPatterns` 能否匹配到真实索引）。
 </details>
 
 <details>
@@ -515,10 +583,21 @@ AI 越能给出具体结论。参见 [`docs/knowledge-base.md`](docs/knowledge-b
 </details>
 
 <details>
+<summary><b>报错 LLM 未返回合法 JSON / Unterminated string</b></summary>
+
+多见于**推理模型**：思考过程占用 completion tokens，`maxTokens` 给小了会导致
+输出 JSON 被截断。请把 `ai.routing.reasoning.maxTokens` 调大（建议 ≥ 8000），
+或减少 `diagnosis.compression.maxTemplates` 以缩短输出。
+</details>
+
+<details>
 <summary><b>Docker 构建时 npm install 失败</b></summary>
 
-检查 `package-lock.json` 是否与 `package.json` 同步（用 `npm ci` 需要严格一致）。
+检查 `package-lock.json` 是否与 `package.json` 同步（`npm ci` 要求严格一致）。
 Dockerfile 已做 `npm ci || npm install` 兜底。离线环境请先在有网机器构建好镜像。
+
+> 另注：runtime 阶段**不要**尝试 `COPY <workspace>/node_modules`。
+> npm workspaces 会把依赖 hoist 到根 `node_modules`，子包目录下并不存在该目录。
 </details>
 
 <details>
@@ -526,13 +605,16 @@ Dockerfile 已做 `npm ci || npm install` 兜底。离线环境请先在有网�
 
 三层防护：① 日志压缩降低 1~2 个数量级；② `ai.limits.maxInputTokens` 硬上限；
 ③ `cacheTtlSeconds` 缓存相同输入的结论。另外可在 provider 侧设置用量上限。
+
+> 另外注意定时巡检的成本：`alerts.scheduler.scanIntervalMinutes` × 非 edge 服务数
+> 就是每日诊断次数，开之前先估算一下。
 </details>
 
 <details>
 <summary><b>能对接其他大模型吗？</b></summary>
 
-可以。任何兼容 OpenAI 协议的服务（通义千问 / 智谱 / 本地 vLLM / Ollama）都能接，
-只需在 `ai.providers` 里加一个 provider 并改 `routing`。
+可以。任何兼容 OpenAI 协议的服务都能接——公有云网关、自建推理服务、本地部署均可。
+只需在 `ai.providers` 里加一个 provider 并调整 `routing`。
 </details>
 
 ---
@@ -540,7 +622,8 @@ Dockerfile 已做 `npm ci || npm install` 兜底。离线环境请先在有网�
 ## 🗺️ 路线图
 
 - [x] **v1.0**：固定诊断流水线 + 只读边界 + 脱敏 + 成果度量（当前版本）
-- [ ] **v1.x**：更多数据源（K8s events、MySQL 慢查询）、诊断结论导出报告、告警降噪规则可配置化
+- [ ] **v1.x**：更多数据源、诊断结论导出报告、告警降噪规则可配置化、
+      重试时自适应降低输入规模（避免推理模型 JSON 截断）
 - [ ] **v2.0**：**Agent 化**——在只读工具集内自主决定取证路径（工具接口已预留）
 - [ ] **v2.x**：跨服务链路追踪、案例库自动向量检索
 
@@ -555,7 +638,10 @@ Dockerfile 已做 `npm ci || npm install` 兜底。离线环境请先在有网�
 2. 提交前跑 `npm run build` 确保编译通过
 3. 提交 PR 并说明动机与测试方式
 
-## 📄 License
+**代码风格约定**：TypeScript strict；新增配置项需同步更新 `config/schema.ts` 与
+`config.example.yaml`；涉及只读边界的代码改动请在 PR 中说明安全影响。
+
+## 📄 许可证
 
 [MIT](LICENSE)
 
