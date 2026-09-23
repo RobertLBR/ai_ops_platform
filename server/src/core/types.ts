@@ -76,8 +76,10 @@ export interface DiagnosisConclusion {
     evidence: string;
   }[];
   checklist: string[];
-  /** 只读命令，展示不执行，需人工确认 */
+  /** 只读命令，展示不执行，需人工确认；未过白名单的命令保留展示并带禁止执行标注 */
   suggested_commands: string[];
+  /** suggested_commands 逐条的只读白名单校验结果（与之一一对应） */
+  suggested_commands_guard?: { command: string; allowed: boolean; reason: string | null }[];
   /** AI 主动声明查不到的信息 —— 比硬猜有价值 */
   data_gaps: string[];
 }

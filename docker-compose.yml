@@ -36,6 +36,15 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+    # 容器日志轮转：防止 json-file 无界增长打满宿主机磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # 资源上限（compose 兼容写法，非 swarm 也生效）：诊断是内存密集型任务，限制单机影响面
+    mem_limit: 512m
+    cpus: 1.0
 
 volumes:
   aiops-data:

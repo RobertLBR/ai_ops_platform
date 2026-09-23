@@ -33,16 +33,53 @@ export class CommandRejectedError extends Error {
   }
 }
 
+/** 文件读取类命令：其绝对路径参数必须落在允许的目录前缀内（防路径穿越读任意文件）。 */
+const FILE_READ_COMMANDS = new Set(['cat', 'tail', 'head', 'less', 'more', 'wc', 'grep', 'file', 'stat', 'ls']);
+
+/** docker 子命令中带值的旗标（校验容器名时跳过其值，如 --format '{{.State.Status}}'）。 */
+const DOCKER_VALUE_FLAGS = new Set(['--format', '--since', '--until', '--tail', '--filter', '-f', '-n']);
+
+/** POSIX 路径规范化：折叠重复斜杠、解析 '.' 与 '..'（不访问文件系统）。 */
+function normalizePosixPath(p: string): string {
+  const parts = p.split('/');
+  const out: string[] = [];
+  for (const part of parts) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      out.pop();
+      continue;
+    }
+    out.push(part);
+  }
+  return '/' + out.join('/');
+}
+
+/** 从白名单条目推导允许的路径前缀（如 `cat /var/log` → `/var/log`）。 */
+export function deriveAllowedPathPrefixes(allowPrefixes: string[]): string[] {
+  const out = new Set<string>();
+  for (const entry of allowPrefixes) {
+    for (const token of entry.trim().split(/\s+/)) {
+      if (token.startsWith('/') && !token.includes('..')) {
+        out.add(normalizePosixPath(token));
+      }
+    }
+  }
+  return [...out];
+}
+
 /**
  * 命令安全校验器。独立成类，便于单元测试。
  */
 export class CommandGuard {
   private readonly allowPrefixes: string[];
   private readonly blockPatterns: RegExp[];
+  private readonly allowedPathPrefixes: string[];
 
   constructor(
     allowPrefixes: string[],
     blockedPatternStrings: string[],
+    /** 允许读取的绝对路径前缀。不传则从白名单条目中的路径参数自动推导。 */
+    allowedPathPrefixes?: string[],
   ) {
     this.allowPrefixes = allowPrefixes.map((p) => p.trim()).filter(Boolean);
     this.blockPatterns = [];
@@ -53,6 +90,49 @@ export class CommandGuard {
         logger.error('blockedPatterns 正则编译失败，已跳过', { pattern: p, error: (e as Error).message });
       }
     }
+    this.allowedPathPrefixes = (allowedPathPrefixes ?? deriveAllowedPathPrefixes(this.allowPrefixes)).map(normalizePosixPath);
+  }
+
+  /** 校验绝对路径是否落在允许的前缀目录内（精确等于前缀或在其子路径下）。 */
+  private isPathAllowed(p: string): boolean {
+    const norm = normalizePosixPath(p);
+    return this.allowedPathPrefixes.some((prefix) => norm === prefix || norm.startsWith(prefix.replace(/\/$/, '') + '/'));
+  }
+
+  /** 文件读取类命令的路径参数校验（防 `cat /var/log/../../etc/shadow`、`tail -n 50 /etc/shadow`）。 */
+  private checkFileReadPaths(tokens: string[]): string | null {
+    const cmdName = tokens[0].toLowerCase();
+    if (!FILE_READ_COMMANDS.has(cmdName)) return null;
+    const paths = tokens.slice(1).filter((t) => t.startsWith('/'));
+    if (paths.length === 0) return null;
+    if (this.allowedPathPrefixes.length === 0) {
+      return `文件读取命令 ${cmdName} 带绝对路径参数，但未配置任何允许的路径前缀（安全默认拒绝）`;
+    }
+    for (const p of paths) {
+      if (!this.isPathAllowed(p)) {
+        return `路径 ${p} 不在允许的目录前缀内（${this.allowedPathPrefixes.join(', ')}），已拒绝`;
+      }
+    }
+    return null;
+  }
+
+  /** docker logs/inspect 的容器名校验：必须是合法容器名，不得含路径分隔符。 */
+  private checkDockerArgs(tokens: string[]): string | null {
+    if (tokens[0].toLowerCase() !== 'docker' || tokens.length < 2) return null;
+    const sub = tokens[1].toLowerCase();
+    if (sub !== 'logs' && sub !== 'inspect') return null;
+    for (let i = 2; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t.startsWith('-')) {
+        // --format=value 形式自包含；--format value 形式跳过下一个旗标值
+        if (!t.includes('=') && DOCKER_VALUE_FLAGS.has(t)) i++;
+        continue;
+      }
+      if (!/^[a-zA-Z0-9_.-]+$/.test(t)) {
+        return `docker ${sub} 的容器名非法（仅允许 [a-zA-Z0-9_.-]，不得含路径分隔符）：${t}`;
+      }
+    }
+    return null;
   }
 
   /** 校验命令，返回拒绝原因（null 表示通过）。 */
@@ -71,7 +151,13 @@ export class CommandGuard {
       return `命令含管道符，一期只允许单条命令：${cmd}`;
     }
 
-    // 2. 危险模式黑名单
+    // 2. 路径穿越：任何参数含 '..' 直接拒绝（在黑名单与白名单之前，最高优先级的路径防护）
+    const tokens = cmd.split(/\s+/);
+    if (tokens.some((t) => t.includes('..'))) {
+      return `命令参数含 '..'（疑似路径穿越），已拒绝：${cmd}`;
+    }
+
+    // 3. 危险模式黑名单
     for (const re of this.blockPatterns) {
       re.lastIndex = 0;
       if (re.test(cmd)) {
@@ -79,7 +165,7 @@ export class CommandGuard {
       }
     }
 
-    // 3. 白名单前缀
+    // 4. 白名单前缀
     if (this.allowPrefixes.length === 0) {
       return '未配置任何 allowedCommandPrefixes，安全默认拒绝所有命令';
     }
@@ -91,6 +177,14 @@ export class CommandGuard {
     if (!ok) {
       return `命令不在白名单内，已拒绝：${cmd}`;
     }
+
+    // 5. 文件读取类命令：绝对路径参数必须落在允许的目录前缀内
+    const pathReason = this.checkFileReadPaths(tokens);
+    if (pathReason) return pathReason;
+
+    // 6. docker logs/inspect：容器名必须为合法标识符，杜绝路径分隔符
+    const dockerReason = this.checkDockerArgs(tokens);
+    if (dockerReason) return dockerReason;
 
     return null; // 通过
   }

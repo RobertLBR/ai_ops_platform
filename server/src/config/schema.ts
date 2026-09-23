@@ -30,6 +30,13 @@ const DatabaseSchema = z.object({
   path: z.string().default('data/aiops.db'),
 });
 
+const StorageSchema = z
+  .object({
+    // 诊断任务（含日志模板/结论等大字段）的保留天数，超期由调度器每日清理
+    retentionDays: z.coerce.number().int().positive().default(90),
+  })
+  .default({});
+
 const AiProviderSchema = z.object({
   baseUrl: z.string().url(),
   apiKey: z.string().optional().default(''),
@@ -234,6 +241,7 @@ const MetricsSchema = z
 export const AppConfigSchema = z.object({
   server: ServerSchema.default({}),
   database: DatabaseSchema.default({}),
+  storage: StorageSchema,
   ai: AiSchema,
   datasources: DatasourcesSchema.default({}),
   services: z.array(ServiceSchema).default([]),

@@ -117,7 +117,10 @@ export class ElasticsearchSource {
     if (params.levels?.length) {
       // 级别字段可能有多种写法，用 multi_match 或 should
       const levelField = fm.level[0] ?? 'level';
-      must.push({ terms: { [levelField]: params.levels.map((l) => l.toLowerCase()) } });
+      // ES 中 level 大小写不统一（有的存 'ERROR' 有的存 'error'），terms 是精确匹配，
+      // 只发小写会在大写 level 的索引上静默查 0 条 —— 原始值与小写值一并带上（去重）
+      const levelValues = [...new Set(params.levels.flatMap((l) => [l, l.toLowerCase()]))];
+      must.push({ terms: { [levelField]: levelValues } });
     }
 
     if (params.keyword?.trim()) {

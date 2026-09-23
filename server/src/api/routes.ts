@@ -16,6 +16,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { AppConfig, resolveService } from '../config/schema';
 import { Database } from '../storage/database';
 import { DiagnosisEngine } from '../core/diagnosis-engine';
+import { Redactor } from '../core/redaction';
 import { parseInboundAlerts, severityAtLeast } from './alert-parser';
 import { InboundAlert } from '../core/types';
 import { CommandGuard } from '../datasources/ssh';
@@ -25,13 +26,17 @@ export interface ApiContext {
   config: AppConfig;
   db: Database;
   engine: DiagnosisEngine;
+  /** 脱敏器（告警原文落库前的合规闸口） */
+  redactor: Redactor;
   /** 进程启动时间，用于 uptime */
   startedAt: number;
   /** 构建版本信息 */
   version: string;
 }
 
-/** Bearer Token 鉴权中间件（apiToken 为空时放行，仅限内网自用）。 */
+/** Bearer Token 鉴权中间件（apiToken 为空时放行，仅限内网自用）。
+ *  注意：只认 Authorization header；不再支持 ?token= query 传参
+ *  （query 会进访问日志/浏览器历史，等同于明文泄露）。 */
 function authMiddleware(config: AppConfig) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const token = config.server.apiToken;
@@ -40,7 +45,7 @@ function authMiddleware(config: AppConfig) {
       return;
     }
     const header = req.headers.authorization ?? '';
-    const provided = header.startsWith('Bearer ') ? header.slice(7) : String(req.query.token ?? '');
+    const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
     if (provided !== token) {
       res.status(401).json({ error: 'unauthorized', message: '缺少或错误的 API Token' });
       return;
@@ -59,7 +64,7 @@ function verifyWebhookSecret(config: AppConfig, req: Request): boolean {
 
 export function createApiRouter(ctx: ApiContext): Router {
   const router = Router();
-  const { config, db, engine } = ctx;
+  const { config, db, engine, redactor } = ctx;
 
   // -------------------------------------------------------------------------
   // 健康与元信息（不鉴权，供容器 healthcheck 使用）
@@ -312,7 +317,21 @@ export function createApiRouter(ctx: ApiContext): Router {
         alert.status === 'firing' &&
         severityAtLeast(alert.severity, config.alerts.webhook.minSeverity);
 
-      db.insertAlert({ ...alert, diagnosisId, deduped: isDup });
+      // 告警原文落库前脱敏（合规闸口），只保留脱敏命中计数到审计
+      const redactedRaw = redactor.redactObject(alert.raw ?? {});
+      const safeAlert = { ...alert, raw: redactedRaw.value };
+      if (redactedRaw.totalRedacted > 0) {
+        db.insertAudit({
+          id: `aud_${Date.now().toString(36)}`,
+          at: new Date().toISOString(),
+          actor: 'system',
+          action: 'alert.redacted',
+          target: alert.id,
+          detail: { redacted: redactedRaw.totalRedacted },
+        });
+      }
+
+      db.insertAlert({ ...safeAlert, diagnosisId, deduped: isDup });
 
       if (shouldDiagnose) {
         // 异步触发，不阻塞 webhook 响应（Alertmanager 有超时）
@@ -324,7 +343,7 @@ export function createApiRouter(ctx: ApiContext): Router {
               serviceName: alert.service ?? undefined,
               alertId: alert.id,
             });
-            db.insertAlert({ ...alert, diagnosisId: task.id, deduped: isDup });
+            db.insertAlert({ ...safeAlert, diagnosisId: task.id, deduped: isDup });
           } catch (e) {
             logger.error('告警自动诊断失败', { alertId: alert.id, error: (e as Error).message });
           }

@@ -57,6 +57,29 @@ async function main(): Promise<void> {
   const { config, configPath, missingEnvVars, warnings } = loaded;
   setLogLevel(config.server.logLevel);
 
+  // --- 1.5 安全启动闸：非回环地址监听 + 无 API Token = 任何人都能访问，直接拒绝启动 ---
+  // 纯内网场景可显式设置 AIOPS_ALLOW_INSECURE_NO_AUTH=true 跳过（会打 warn）。
+  const bindHost = config.server.host.trim().toLowerCase();
+  const isLoopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
+  if (!isLoopback && !config.server.apiToken) {
+    if (process.env.AIOPS_ALLOW_INSECURE_NO_AUTH === 'true') {
+      logger.warn('⚠ 监听非回环地址且未配置 apiToken，API 完全无鉴权（AIOPS_ALLOW_INSECURE_NO_AUTH=true 显式放行）。请确认仅在隔离内网使用。', {
+        host: config.server.host,
+        port: config.server.port,
+      });
+    } else {
+      process.stderr.write(
+        `\n[启动失败] server.host=${config.server.host} 为非回环地址，但 server.apiToken 为空，` +
+          `API 将对任何可达者完全开放，已拒绝启动。\n` +
+          `  处理方式（二选一）：\n` +
+          `  1. 设置环境变量 AIOPS_API_TOKEN（配置中 apiToken: \${AIOPS_API_TOKEN}）；\n` +
+          `  2. 仅本机使用：把 server.host 改为 127.0.0.1；\n` +
+          `  3. 确认为隔离内网环境：显式设置 AIOPS_ALLOW_INSECURE_NO_AUTH=true。\n\n`,
+      );
+      process.exit(1);
+    }
+  }
+
   logger.info('配置已加载', {
     configPath,
     services: config.services.length,
@@ -72,6 +95,8 @@ async function main(): Promise<void> {
 
   // --- 2. 数据库 ---
   const db = new Database(config.database.path);
+  // 回收上次进程异常退出遗留的非终态任务（否则永远显示"分析中"）
+  db.markStaleTasksFailed();
 
   // --- 3. 脱敏器（合规闸口）---
   const redactor = createRedactor(
@@ -109,7 +134,7 @@ async function main(): Promise<void> {
   });
 
   const startedAt = Date.now();
-  app.use('/api', createApiRouter({ config, db, engine, startedAt, version: VERSION }));
+  app.use('/api', createApiRouter({ config, db, engine, redactor, startedAt, version: VERSION }));
 
   // 手动触发一次日报（运维调试用）
   const scheduler = new Scheduler(config, db, engine, llm);
