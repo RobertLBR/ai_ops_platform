@@ -14,8 +14,9 @@
 
 import { AppConfig } from '../config/schema';
 import { Database } from '../storage/database';
-import { DiagnosisEngine } from '../core/diagnosis-engine';
+import { DiagnosisEngine, CollectedEvidence } from '../core/diagnosis-engine';
 import { LlmRouter } from '../ai/llm-router';
+import { MetricSnapshot } from '../core/types';
 import { httpRequest } from '../datasources/http';
 import { logger } from '../utils/logger';
 
@@ -35,6 +36,39 @@ function assertFeishuOk(resp: unknown): void {
   if (Number.isNaN(code) || code === 0) return;
   const msg = String(r.msg ?? r.StatusMessage ?? 'unknown');
   throw new Error(`飞书返回业务错误 code=${code} msg=${msg}（19024 = 自定义关键词不匹配）`);
+}
+
+/**
+ * 巡检前置闸的指标粗判 critical（保守启发式，宁可多诊不可漏诊）：
+ *   - OOM/重启/崩溃类计数指标出现非零值；
+ *   - 百分比类指标（cpu/memory/disk/jvm 使用率）达到 95% 以上。
+ */
+function hasCriticalMetric(metrics: MetricSnapshot[]): boolean {
+  for (const m of metrics) {
+    if (m.error) continue;
+    const oomLike = /oom|restart|crash/i.test(m.name);
+    for (const v of m.values) {
+      if (oomLike && v.value > 0) return true;
+      if (v.value >= 95) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 巡检免费前置闸：取证 + 压缩（零 LLM 费用）后，全部满足以下条件才跳过诊断：
+ *   1. 无 isNew 模板（基线期内从未出现的新模式）；
+ *   2. 无频率突增（与 prompts.renderTemplates 同一口径：基线 > 0 且超过 3 倍）；
+ *   3. 压缩后无 ERROR 级别模板；
+ *   4. 指标无 critical。
+ */
+function shouldSkipLlm(ev: CollectedEvidence): boolean {
+  const hasNew = ev.templates.some((t) => t.isNew);
+  const hasSpike = ev.templates.some(
+    (t) => t.baselineCount !== undefined && t.baselineCount !== null && t.baselineCount > 0 && t.count / t.baselineCount > 3,
+  );
+  const hasError = ev.templates.some((t) => t.levels.includes('ERROR'));
+  return !hasNew && !hasSpike && !hasError && !hasCriticalMetric(ev.metrics);
 }
 
 export class Scheduler {
@@ -88,6 +122,12 @@ export class Scheduler {
     logger.debug('日报已排程', { nextRun: next.toISOString(), delayMs: delay });
 
     this.dailyTimer = setTimeout(() => {
+      // 数据生命周期：每日随日报节奏清理过期诊断任务（含大字段）
+      try {
+        this.db.purgeOldTasks(this.config.storage.retentionDays);
+      } catch (e) {
+        logger.warn('过期诊断任务清理失败', { error: (e as Error).message });
+      }
       void this.runDailyReport().catch((e) => logger.error('日报生成异常', { error: (e as Error).message }));
       // 执行后重新排下一天
       this.scheduleDaily(hour, minute);
@@ -117,8 +157,37 @@ export class Scheduler {
       for (const svc of services) {
         scanned++;
         try {
-          // 用诊断流水线跑一次；基线对比在 compress 内部完成，
-          // 新模板会被打上 isNew 标记
+          // 免费前置闸：先只跑「取证 + 脱敏 + 压缩」（零 LLM 费用），
+          // 基线对比在 compress 内部完成，新模板会被打上 isNew 标记。
+          // 无任何异常迹象时跳过 LLM 诊断，避免每个周期对每个服务无条件付费。
+          const ev = await this.engine.collectAndCompress(svc);
+
+          if (ev.empty) {
+            logger.debug('巡检取证为空，跳过', { service: svc.canonicalName });
+            continue;
+          }
+
+          if (shouldSkipLlm(ev)) {
+            // 回写基线：正常频率也要持续累积，否则基线永远停留在出故障的日子
+            this.engine.recordBaseline(svc.canonicalName, ev.templates);
+            // 落审计，日报中可区分"跳过"与"诊断"（action: scan.skipped_no_anomaly）
+            this.db.insertAudit({
+              id: `aud_${Date.now().toString(36)}_${scanned}`,
+              at: new Date().toISOString(),
+              actor: 'scheduler',
+              action: 'scan.skipped_no_anomaly',
+              target: svc.canonicalName,
+              detail: {
+                templateCount: ev.templates.length,
+                rawLogCount: ev.rawLogCount,
+                timeFrom: ev.timeFrom,
+                timeTo: ev.timeTo,
+              },
+            });
+            logger.debug('巡检无异常迹象，跳过 LLM 诊断', { service: svc.canonicalName, templateCount: ev.templates.length });
+            continue;
+          }
+
           const { task } = await this.engine.diagnose({
             question: `[定时扫描] ${svc.canonicalName} 近 ${this.config.diagnosis.windowBeforeMinutes} 分钟异常日志巡检`,
             trigger: 'schedule',
@@ -169,6 +238,10 @@ export class Scheduler {
     const failedTasks = last24h.filter((t) => t.status === 'failed');
     const criticalTasks = last24h.filter((t) => t.conclusion?.severity === 'critical');
     const wrongConclusions = last24h.filter((t) => t.feedback?.verdict === 'wrong');
+    // 巡检前置闸跳过的次数（无异常未耗 token），与正式诊断任务区分开
+    const skippedScans = this.db
+      .listAudit(500)
+      .filter((a) => a.at >= dayAgo && a.action === 'scan.skipped_no_anomaly').length;
 
     let narrative = '';
     // 用轻量档模型做一句话总结（低频任务，不值得用主力模型）
@@ -190,6 +263,7 @@ export class Scheduler {
             `诊断任务：共 ${last24h.length} 次，失败 ${failedTasks.length} 次`,
             `其中判定为 critical：${criticalTasks.length} 次`,
             `人工标记结论错误：${wrongConclusions.length} 次`,
+            `定时巡检跳过（无异常迹象，未消耗 token）：${skippedScans} 次`,
             '',
             `累计指标：`,
             `- 累计诊断 ${summary.tasks?.total ?? 0} 次，完成 ${summary.tasks?.done ?? 0} 次`,
@@ -217,7 +291,7 @@ export class Scheduler {
     } catch (e) {
       logger.warn('日报叙述生成失败，降级为纯数据日报', { error: (e as Error).message });
       narrative =
-        `最近 24 小时：诊断 ${last24h.length} 次，失败 ${failedTasks.length} 次，critical ${criticalTasks.length} 次。\n` +
+        `最近 24 小时：诊断 ${last24h.length} 次，失败 ${failedTasks.length} 次，critical ${criticalTasks.length} 次，巡检无异常跳过 ${skippedScans} 次。\n` +
         `累计节省人工 ${summary.speed?.savedHours ?? 0} 小时，结论有用率 ${summary.accuracy?.usefulRate ?? 'N/A'}%。`;
     }
 
@@ -238,7 +312,7 @@ export class Scheduler {
       actor: 'scheduler',
       action: 'daily_report.sent',
       target: '',
-      detail: { taskCount24h: last24h.length, failedCount: failedTasks.length, pushed: !!url },
+      detail: { taskCount24h: last24h.length, failedCount: failedTasks.length, skippedScans, pushed: !!url },
     });
 
     return text;

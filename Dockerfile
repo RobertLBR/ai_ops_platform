@@ -25,7 +25,9 @@ COPY server/package.json ./server/
 COPY web/package.json ./web/
 
 # 安装全量依赖（含 devDependencies：typescript / vite / @types）
-RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+# 只走 npm ci：lockfile 装不上就直接构建失败，不用 npm install 兜底
+# （兜底会静默漂移依赖版本，构建结果不可复现）
+RUN npm ci --no-audit --no-fund
 
 # 拷贝全部源码
 COPY tsconfig.json ./

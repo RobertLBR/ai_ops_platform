@@ -48,6 +48,7 @@
 |---|---|---|
 | `server` | 监听地址、端口、前端目录、API Token、日志级别 | ✅ |
 | `database` | SQLite 文件路径 | ✅ |
+| `storage` | 诊断任务数据保留天数（自动清理） | 可选 |
 | `ai` | 模型 provider、分级路由、成本上限、**脱敏规则** | ✅（诊断需） |
 | `datasources` | ES / Prometheus / SSH 三种只读数据源 | ✅（诊断需） |
 | `services` | **服务注册表**：别名、索引、依赖、已知问题 | ✅（准确率关键） |
@@ -97,8 +98,10 @@ server:
   logLevel: info           # debug | info | warn | error
 ```
 
-- `apiToken` 留空时启动日志会给出警告。**对外暴露务必设置。**
-- 设置后，除 `/api/health` 外所有接口需 `Authorization: Bearer <token>`（或 `?token=`）。
+- `host` 为非回环地址（如 `0.0.0.0`）且 `apiToken` 为空时，**服务会拒绝启动**（防止零认证端口对外暴露）。
+  确认为隔离内网环境时，可显式设置环境变量 `AIOPS_ALLOW_INSECURE_NO_AUTH=true` 跳过（启动日志会给出 warn）。
+- 设置后，除 `/api/health` 外所有接口需 `Authorization: Bearer <token>`。
+  **不再支持 `?token=` query 传参**（query 会进访问日志/浏览器历史，等同于明文泄露）。
 
 ---
 
@@ -113,6 +116,19 @@ database:
 
 > `data` 目录不存在时会自动创建。容器内该目录属主是非 root 的 `aiops` 用户，
 > 挂载宿主机目录前请先 `chown`，或直接用命名卷。
+
+---
+
+## storage — 数据生命周期
+
+```yaml
+storage:
+  retentionDays: 90        # 诊断任务（含日志模板/结论等大字段）的保留天数
+```
+
+- 调度器每日自动删除 `created_at` 早于该天数的诊断任务，防止 SQLite 无界膨胀。
+- 进程重启时，上次退出遗留的非终态任务（pending/collecting/analyzing）会被批量标记为
+  `failed`（原因「进程重启中断」），不会永远卡在"分析中"。
 
 ---
 

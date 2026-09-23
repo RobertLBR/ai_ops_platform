@@ -20,7 +20,9 @@ server:
   port: 3000
   # 单页应用静态资源目录（web 构建产物）。相对路径基于项目根目录。
   webRoot: web/dist
-  # API 访问令牌。留空表示不校验（仅限内网单机自用）。
+  # API 访问令牌（只认 Authorization: Bearer 头）。
+  # 注意：host 为非回环地址（如 0.0.0.0）且 apiToken 为空时，服务会拒绝启动。
+  #       纯隔离内网可显式设置环境变量 AIOPS_ALLOW_INSECURE_NO_AUTH=true 跳过（启动日志会告警）。
   # 生产环境请设置：${AIOPS_API_TOKEN}
   apiToken: ${AIOPS_API_TOKEN}
   logLevel: info           # debug | info | warn | error
@@ -31,6 +33,13 @@ server:
 database:
   # Docker 部署时建议指向挂载卷，例如 /app/data/aiops.db
   path: data/aiops.db
+
+# ---------------------------------------------------------------------------
+# 数据生命周期
+# ---------------------------------------------------------------------------
+storage:
+  # 诊断任务（含日志模板/结论等大字段）的保留天数，超期由调度器每日自动清理
+  retentionDays: 90
 
 # ---------------------------------------------------------------------------
 # AI / 大模型配置

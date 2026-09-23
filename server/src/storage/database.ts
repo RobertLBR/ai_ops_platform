@@ -450,6 +450,43 @@ export class Database {
     return scored.map((s) => ({ ...s.c, _score: s.score }));
   }
 
+  // -------------------------------------------------------------------------
+  // 数据生命周期（保留期清理 + 僵尸任务回收）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 删除 created_at 早于 N 天前的诊断任务（log_templates/metrics/conclusion 等大字段
+   * 与任务同行存储，随行一并删除）。返回删除行数。
+   */
+  purgeOldTasks(retentionDays: number): number {
+    const cutoff = new Date(Date.now() - retentionDays * 86400000).toISOString();
+    const r = this.db.prepare('DELETE FROM diagnosis_tasks WHERE created_at < ?').run(cutoff);
+    const deleted = Number(r.changes ?? 0);
+    if (deleted > 0) {
+      logger.info('已清理过期诊断任务', { retentionDays, deleted });
+    }
+    return deleted;
+  }
+
+  /**
+   * 进程重启后回收僵尸任务：上次进程退出时仍处于非终态（pending/collecting/analyzing）
+   * 的任务永远不会再被推进，批量标记为 failed。返回受影响行数。
+   */
+  markStaleTasksFailed(): number {
+    const r = this.db
+      .prepare(
+        `UPDATE diagnosis_tasks
+         SET status = 'failed', error = '进程重启中断', updated_at = ?
+         WHERE status IN ('pending', 'collecting', 'analyzing')`,
+      )
+      .run(new Date().toISOString());
+    const marked = Number(r.changes ?? 0);
+    if (marked > 0) {
+      logger.warn('发现上次进程中断遗留的僵尸任务，已标记为失败', { count: marked });
+    }
+    return marked;
+  }
+
   close(): void {
     try {
       this.db.close();

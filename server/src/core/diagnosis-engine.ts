@@ -25,6 +25,7 @@ import { LlmRouter } from '../ai/llm-router';
 import { Redactor } from '../core/redaction';
 import { LogClusterer, applyBaseline, selectTopTemplates } from '../core/compression';
 import { buildDiagnosisPrompt, sanitizeConclusion } from '../ai/prompts';
+import { CommandGuard } from '../datasources/ssh';
 import { DiagnosisTask, LogTemplate, MetricSnapshot, NormalizedLog } from '../core/types';
 import { logger } from '../utils/logger';
 
@@ -44,10 +45,34 @@ export interface DiagnoseResult {
   task: DiagnosisTask;
 }
 
+/** 取证 + 脱敏 + 压缩的中间产物（巡检前置闸与完整诊断流水线共用）。 */
+export interface CollectedEvidence {
+  service: ServiceDef | null;
+  timeFrom: string;
+  timeTo: string;
+  templates: LogTemplate[];
+  metrics: MetricSnapshot[];
+  rawLogCount: number;
+  redactionAudit: { rule: string; count: number }[];
+  logError: string | null;
+  /** 时间窗内未取到任何日志与指标 */
+  empty: boolean;
+}
+
 let seq = 0;
 function genId(prefix: string): string {
   seq = (seq + 1) % 100000;
   return `${prefix}_${Date.now().toString(36)}_${seq.toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** 合并两组脱敏审计计数（按规则名累加）。 */
+function mergeAudit(
+  a: { rule: string; count: number }[],
+  b: { rule: string; count: number }[],
+): { rule: string; count: number }[] {
+  const map = new Map<string, number>();
+  for (const e of [...a, ...b]) map.set(e.rule, (map.get(e.rule) ?? 0) + e.count);
+  return [...map.entries()].map(([rule, count]) => ({ rule, count }));
 }
 
 export class DiagnosisEngine {
@@ -57,12 +82,18 @@ export class DiagnosisEngine {
   private readonly redactor: Redactor;
   private readonly esSources = new Map<string, ElasticsearchSource>();
   private readonly promSources: PrometheusSource[] = [];
+  /** AI 建议命令的只读白名单校验器（与 SSH 执行侧共用同一份 security 配置） */
+  private readonly commandGuard: CommandGuard;
 
   constructor(config: AppConfig, db: Database, llm: LlmRouter, redactor: Redactor) {
     this.config = config;
     this.db = db;
     this.llm = llm;
     this.redactor = redactor;
+    this.commandGuard = new CommandGuard(
+      config.security.readonly.allowedCommandPrefixes,
+      config.security.readonly.blockedPatterns,
+    );
 
     for (const ds of config.datasources.elasticsearch) {
       if (ds.enabled) this.esSources.set(ds.id, new ElasticsearchSource(ds));
@@ -103,11 +134,14 @@ export class DiagnosisEngine {
     const startedAt = Date.now();
     const nowIso = new Date().toISOString();
 
+    // 提问内容落库前先脱敏（合规闸口），审计计数随后并入任务级 redactionAudit
+    const qRedact = this.redactor.redact(opts.question);
+
     const task: DiagnosisTask = {
       id: genId('diag'),
       status: 'pending',
       trigger: opts.trigger,
-      question: opts.question,
+      question: qRedact.text,
       serviceName: null,
       timeFrom: null,
       timeTo: null,
@@ -150,29 +184,25 @@ export class DiagnosisEngine {
         alertId: opts.alertId ?? null,
       });
 
-      // --- ② 并行只读取证 ---
-      const [logs, logError, metrics] = await this.collectEvidence(service, from, to);
+      // --- ②③④ 取证 → 脱敏 → 压缩（与巡检前置闸共用的中间步骤）---
+      const ev = await this.collectAndCompress(service, from, to);
 
-      if (logError) {
-        logger.warn('日志取证部分失败', { error: logError });
-      }
-
-      if (logs.length === 0 && metrics.length === 0) {
+      if (ev.empty) {
         throw new Error(
           `取证为空：时间窗 ${from} ~ ${to} 内未查到任何日志或指标。` +
-            (logError ? ` ES 错误：${logError}` : '') +
+            (ev.logError ? ` ES 错误：${ev.logError}` : '') +
             (service ? '' : ' 另外未能识别服务名，请检查 config.yaml 的 services 配置与别名。'),
         );
       }
 
-      // --- ③ 脱敏（合规闸口，必须在压缩与送入模型之前）---
-      const redacted = this.redactLogs(logs);
-
-      // --- ④ 压缩 ---
       this.db.updateTask(task.id, { status: 'analyzing' });
       task.status = 'analyzing';
 
-      const { templates, rawLogCount } = this.compress(redacted.logs, service, redacted.audit);
+      const templates = ev.templates;
+      const metrics = ev.metrics;
+      const rawLogCount = ev.rawLogCount;
+      // 合并日志脱敏与提问脱敏的审计计数
+      const redactedAudit = mergeAudit(ev.redactionAudit, qRedact.audit);
 
       // --- ⑤⑥ 注入知识 + 大模型推理 ---
       const similarCases = this.db
@@ -184,7 +214,7 @@ export class DiagnosisEngine {
         }));
 
       const { system, user } = buildDiagnosisPrompt({
-        question: this.redactor.redact(opts.question).text,
+        question: qRedact.text,
         service,
         templates,
         metrics,
@@ -213,6 +243,23 @@ export class DiagnosisEngine {
 
       const conclusion = sanitizeConclusion(data);
 
+      // --- 建议命令过只读白名单校验：保留展示，但逐条标注 allowed 结果 ---
+      const commandChecks = conclusion.suggested_commands.map((cmd) => {
+        const reason = this.commandGuard.check(cmd);
+        return { command: cmd, allowed: reason === null, reason };
+      });
+      conclusion.suggested_commands_guard = commandChecks;
+      conclusion.suggested_commands = commandChecks.map((c) =>
+        c.allowed ? c.command : `${c.command}    # ⚠ 未通过只读白名单校验，禁止执行`,
+      );
+      const blockedCommands = commandChecks.filter((c) => !c.allowed);
+      if (blockedCommands.length) {
+        logger.warn('AI 建议命令未通过只读白名单校验，已标注禁止执行', {
+          taskId: task.id,
+          blocked: blockedCommands.map((c) => c.command.slice(0, 120)),
+        });
+      }
+
       // --- 落库（含成果度量字段）---
       const durationMs = Date.now() - startedAt;
       this.db.updateTask(task.id, {
@@ -221,7 +268,7 @@ export class DiagnosisEngine {
         logTemplates: templates,
         metrics,
         conclusion,
-        redactionAudit: redacted.audit,
+        redactionAudit: redactedAudit,
         tokensUsed: { prompt: usage.prompt, completion: usage.completion, model: usage.model },
       });
 
@@ -231,7 +278,7 @@ export class DiagnosisEngine {
         logTemplates: templates,
         metrics,
         conclusion,
-        redactionAudit: redacted.audit,
+        redactionAudit: redactedAudit,
         tokensUsed: { prompt: usage.prompt, completion: usage.completion, model: usage.model },
       });
 
@@ -244,7 +291,7 @@ export class DiagnosisEngine {
         templateCount: templates.length,
         rawLogCount,
         totalTokens: usage.total,
-        redacted: redacted.audit.reduce((s, a) => s + a.count, 0),
+        redacted: redactedAudit.reduce((s, a) => s + a.count, 0),
         severity: conclusion.severity,
       });
 
@@ -271,6 +318,43 @@ export class DiagnosisEngine {
 
       return { task };
     }
+  }
+
+  /**
+   * 取证 + 脱敏 + 压缩的中间步骤。
+   *
+   * 从 diagnose() 中抽取复用：定时巡检的前置闸用它做"免费"异常初筛，
+   * 满足跳过条件时不再进入 LLM 推理（省 token）；完整诊断流水线
+   * 走同一入口，行为与原先一致。
+   */
+  async collectAndCompress(service: ServiceDef | null, timeFrom?: string, timeTo?: string): Promise<CollectedEvidence> {
+    const { from, to } = this.resolveTimeWindow(timeFrom, timeTo);
+
+    // --- ② 并行只读取证 ---
+    const [logs, logError, metrics] = await this.collectEvidence(service, from, to);
+    if (logError) {
+      logger.warn('日志取证部分失败', { error: logError });
+    }
+
+    const empty = logs.length === 0 && metrics.length === 0;
+
+    // --- ③ 脱敏（合规闸口，必须在压缩与送入模型之前）---
+    const redacted = this.redactLogs(logs);
+
+    // --- ④ 压缩 ---
+    const { templates, rawLogCount } = this.compress(redacted.logs, service, redacted.audit);
+
+    return {
+      service,
+      timeFrom: from,
+      timeTo: to,
+      templates,
+      metrics,
+      rawLogCount,
+      redactionAudit: redacted.audit,
+      logError,
+      empty,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -436,7 +520,8 @@ export class DiagnosisEngine {
     return { templates, rawLogCount: logs.length };
   }
 
-  private recordBaseline(serviceName: string, templates: LogTemplate[]): void {
+  /** 回写模板频率基线（公开：巡检跳过 LLM 时也要持续累积"正常频率"基线）。 */
+  recordBaseline(serviceName: string, templates: LogTemplate[]): void {
     const day = new Date().toISOString().slice(0, 10);
     for (const t of templates) {
       this.db.upsertBaseline(serviceName, hashTemplate(t.template), day, t.count);
