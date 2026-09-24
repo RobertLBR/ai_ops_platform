@@ -29,8 +29,11 @@ import { logger, setLogLevel } from './utils/logger';
 const VERSION = '1.0.0';
 
 function resolveWebRoot(configured: string): string {
+  // 注意：第一个候选必须是绝对路径。若直接返回相对字符串 configured，
+  // SPA 兜底路由 res.sendFile(path.join(webRoot,'index.html')) 会因拿到相对路径而抛
+  // "path must be absolute or specify root"，导致 /favicon.ico、客户端路由等回退 500。
   const candidates = [
-    configured,
+    path.resolve(configured),
     path.resolve(process.cwd(), configured),
     path.resolve(__dirname, '../../web/dist'),
     path.resolve(__dirname, '../web/dist'),

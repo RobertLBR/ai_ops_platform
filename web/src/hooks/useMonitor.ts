@@ -49,6 +49,33 @@ export interface UseMonitorResult {
   isLeader: boolean;
 }
 
+/**
+ * 生成 tab 唯一 ID。
+ *
+ * 不能用 crypto.randomUUID()：该 API 仅在「安全上下文」（HTTPS 或 localhost）可用，
+ * 在局域网 http://IP:PORT 下为 undefined，调用即抛异常导致整个 App 渲染崩溃白屏。
+ * 这里优先用 crypto.getRandomValues（非安全上下文也可用），再退化到 Math.random。
+ */
+function genTabId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      const b = crypto.getRandomValues(new Uint8Array(16));
+      b[6] = (b[6] & 0x0f) | 0x40; // version 4
+      b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+      const hex = Array.from(b, (x) => x.toString(16).padStart(2, '0'));
+      return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex
+        .slice(6, 8)
+        .join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10, 16).join('')}`;
+    }
+  } catch {
+    /* 忽略，继续退化 */
+  }
+  return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function useMonitor(onUnauthorized?: () => void): UseMonitorResult {
   const [enabled, setEnabledState] = useState<boolean>(() => localStorage.getItem(LS_KEY) === '1');
   const [snapshot, setSnapshot] = useState<MonitorSnapshot | null>(null);
@@ -56,7 +83,7 @@ export function useMonitor(onUnauthorized?: () => void): UseMonitorResult {
   const [failing, setFailing] = useState(false);
   const [isLeader, setIsLeader] = useState(false);
 
-  const tabIdRef = useRef<string>(crypto.randomUUID());
+  const tabIdRef = useRef<string>(genTabId());
   const channelRef = useRef<BroadcastChannel | null>(null);
   /** 近 15s 内在频道里说过话的 tabId（claim/heartbeat），选举候选集 */
   const speakersRef = useRef<Map<string, number>>(new Map());
