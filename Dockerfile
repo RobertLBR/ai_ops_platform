@@ -81,11 +81,11 @@ RUN groupadd --system aiops && useradd --system --gid aiops aiops \
  && chown -R aiops:aiops /app
 USER aiops
 
-EXPOSE 3000
+EXPOSE 3003
 
 # 健康检查：探 /api/health（该端点不鉴权，专供容器探活）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:3000/api/health || exit 1
+  CMD curl -fsS http://127.0.0.1:3003/api/health || exit 1
 
 # 数据卷：数据库与运行期数据
 VOLUME ["/app/data"]
