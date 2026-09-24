@@ -225,7 +225,9 @@ const DiagnosisSchema = z
         baselineDays: z.coerce.number().int().positive().default(7),
       })
       .default({}),
-    levelFilter: z.array(z.string()).default(['ERROR', 'WARN', 'FATAL']),
+    // 默认空数组：非空会让本环境多数服务因无独立可过滤的 level 字段而静默查 0 条日志
+    //（生产校准确认 8/12 服务无 log.log_level 字段），且会触发 AI 配置生成的 B4 防御闸。
+    levelFilter: z.array(z.string()).default([]),
     maxContextChars: z.coerce.number().int().positive().default(120000),
   })
   .default({});

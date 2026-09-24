@@ -159,15 +159,14 @@ function checkBusinessRules(svc: ServiceDef, ctx: ValidateContext, errors: strin
     }
   }
 
-  // --- B4：本环境实测约束 ---
-  // 历史实现曾把 levelFilter 非空作为「保存闸」（error），但 config.example.yaml 与 schema 默认值
-  // 均为非空（['ERROR','WARN','FATAL']），导致 AI 配置生成在自带示例配置下「开箱即废」。
-  // diagnosis.levelFilter 是「诊断」全局配置，与单条服务注册表无直接因果，故降级为 warning：
-  // 仅提示本环境 level 字段可能不可过滤（依赖 fieldMapping.level 时知悉限制），不阻断保存。
+  // --- B4：本环境实测约束（防御闸，error 阻断保存）---
+  // diagnosis.levelFilter 非空会让本环境多数服务因无独立可过滤的 level 字段而静默查 0 条日志
+  // （生产校准确认 8/12 服务无 log.log_level 字段）。这是全项目最高频踩坑，必须硬拦截逼用户置空，
+  // 而不是放行成 warning。config.example.yaml 与 schema 默认值均已置 []，故示例配置下不触发、开箱即用。
   if (config.diagnosis.levelFilter.length > 0) {
-    warnings.push(
-      `本环境 diagnosis.levelFilter 非空（${config.diagnosis.levelFilter.join('/')}），实测 level 字段可能不可过滤；` +
-        `若服务依赖 fieldMapping.level 做级别过滤请知悉该限制（已降级为 warning，不影响保存）`,
+    errors.push(
+      `本环境 diagnosis.levelFilter 非空（${config.diagnosis.levelFilter.join('/')}），实测 level 字段不可过滤` +
+        `（生产校准确认多数服务因无 log.log_level 字段而静默查 0 条日志），请先将 config.yaml 的 diagnosis.levelFilter 置空再保存该服务`,
     );
   }
   if (ds && ds.maxDocs > 10000) {
