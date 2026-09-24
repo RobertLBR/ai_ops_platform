@@ -18,6 +18,8 @@ const { Text, Paragraph } = Typography;
 interface Props {
   onUnauthorized: () => void;
   onOpen: (id: string) => void;
+  /** 实时监控快照版本号（OFF 时恒为 0，行为与现状一致） */
+  liveTick?: number;
 }
 
 /** 告警来源 → 中文 */
@@ -48,8 +50,8 @@ function statusMeta(status: string): { text: string; color: string } {
   }
 }
 
-export default function AlertsPage({ onUnauthorized, onOpen }: Props) {
-  const { data, loading, error, reload } = useApi(() => api.listAlerts(100), [], onUnauthorized);
+export default function AlertsPage({ onUnauthorized, onOpen, liveTick = 0 }: Props) {
+  const { data, loading, error, reload } = useApi(() => api.listAlerts(100), [liveTick], onUnauthorized);
 
   const columns: ColumnsType<InboundAlert> = [
     {

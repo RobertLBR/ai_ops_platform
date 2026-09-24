@@ -6,11 +6,17 @@
  */
 
 import type {
+  AiAnalyzeResponse,
+  AiGenerationDetail,
+  AiGenerationListItem,
+  AiSaveResponse,
+  AiValidateResult,
   AuditEntry,
   DiagnosisListItem,
   DiagnosisTask,
   InboundAlert,
   MetricsSummary,
+  MonitorSnapshot,
   SchedulerStatus,
   ServiceInfo,
 } from './types';
@@ -144,4 +150,32 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ command, hostId }),
     }),
+
+  // -------------------------------------------------------------------------
+  // 实时监控（OFF 时不应产生任何调用）
+  // -------------------------------------------------------------------------
+
+  monitorSnapshot: (signal?: AbortSignal) => request<MonitorSnapshot>('/monitor/snapshot', { signal }),
+
+  // -------------------------------------------------------------------------
+  // AI 服务配置生成
+  // -------------------------------------------------------------------------
+
+  aiConfigAnalyze: (body: { logSample: string; userPrompt: string; serviceHint?: string; actor?: string }) =>
+    request<AiAnalyzeResponse>('/ai-config/analyze', { method: 'POST', body: JSON.stringify(body) }),
+
+  aiConfigValidate: (service: Record<string, unknown>) =>
+    request<AiValidateResult>('/ai-config/validate', { method: 'POST', body: JSON.stringify({ service }) }),
+
+  aiConfigSave: (body: { generationId?: string; service: Record<string, unknown>; mode: 'create' | 'update'; actor?: string }) =>
+    request<AiSaveResponse>('/ai-config/save', { method: 'POST', body: JSON.stringify(body) }),
+
+  listAiGenerations: (service?: string, limit = 50) => {
+    const q = new URLSearchParams();
+    if (service) q.set('service', service);
+    q.set('limit', String(limit));
+    return request<{ total: number; items: AiGenerationListItem[] }>(`/ai-config/generations?${q.toString()}`);
+  },
+
+  getAiGeneration: (id: string) => request<AiGenerationDetail>(`/ai-config/generations/${encodeURIComponent(id)}`),
 };

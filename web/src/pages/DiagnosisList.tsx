@@ -19,9 +19,11 @@ const { Text } = Typography;
 interface Props {
   onUnauthorized: () => void;
   onOpen: (id: string) => void;
+  /** 实时监控快照版本号（OFF 时恒为 0，行为与现状一致） */
+  liveTick?: number;
 }
 
-export default function DiagnosisList({ onUnauthorized, onOpen }: Props) {
+export default function DiagnosisList({ onUnauthorized, onOpen, liveTick = 0 }: Props) {
   const [status, setStatus] = useState<string | undefined>();
   const [service, setService] = useState<string | undefined>();
   const [page, setPage] = useState(1);
@@ -29,7 +31,7 @@ export default function DiagnosisList({ onUnauthorized, onOpen }: Props) {
 
   const { data, loading, error, reload } = useApi(
     () => api.listDiagnoses({ limit: pageSize, offset: (page - 1) * pageSize, status, service }),
-    [page, status, service],
+    [page, status, service, liveTick],
     onUnauthorized,
   );
 

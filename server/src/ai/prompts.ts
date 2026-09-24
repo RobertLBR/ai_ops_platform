@@ -293,3 +293,171 @@ export function sanitizeConclusion(raw: unknown): DiagnosisConclusion {
     data_gaps: strArr(o.data_gaps),
   };
 }
+
+// ---------------------------------------------------------------------------
+// AI 服务配置生成（设计文档 2.4）
+//
+// 与诊断 prompt 同一套纪律：封闭 schema 声明 + 不可信数据边界包裹。
+// 输出走 light 档模型，maxTokens 2000（封闭小 JSON 足够）。
+// ---------------------------------------------------------------------------
+
+const SERVICE_CONFIG_SYSTEM = `你是运维平台配置工程师。根据用户提供的日志样例与要求，生成「服务注册表」条目。
+
+输出必须是合法 JSON，且 service 对象只能包含以下 13 个顶层键（多一个都不行，未知键会导致保存失败）：
+canonicalName / displayName / aliases / tier / datasourceId / indexPatterns /
+fieldMapping / deployment / stack / dependsOn / dependedBy / prometheusLabels / knownIssues
+嵌套键同样封闭：fieldMapping 仅 timestamp/level/message/traceId/logger；
+deployment 仅 hostIds/containerNames/port/jenkinsJob/registry；
+knownIssues[] 仅 pattern/category/severity/cause/sop。
+枚举：tier ∈ core|important|edge；knownIssues.severity ∈ low|medium|high|critical。
+
+铁律：
+1. 不许猜。日志样例中看不到的字段填 null，并在 explanations 中说明"样例中未提供"。
+2. fieldMapping.timestamp 与 level 的第 1 个候选必须是样例中真实存在的字段名。
+3. aliases 必须包含服务中文名；displayName 是中文时，aliases 必须包含 displayName 本身。
+4. indexPatterns 只在能从样例来源判断时填写；它与数据源默认索引是覆盖关系不是合并。
+5. 禁止输出任何密码、API Key、私钥、真实内网地址。
+6. prometheusLabels.instance 不允许包含反斜杠。
+7. knownIssues.pattern 必须是合法正则，且只写能直接在样例日志里命中的模式。
+8. canonicalName 必须匹配 ^[a-z][a-z0-9-]*$；datasourceId 只能从「可用数据源」列表中选择。
+
+输出 schema（不要包含 markdown 代码块标记）：
+{ "service": {...}, "explanations": ["每个字段的取值依据，不确定的明确说不确定"] }`;
+
+export interface BuildServiceConfigPromptInput {
+  /** 已脱敏、已截断的日志样例 */
+  logSample: string;
+  /** 已脱敏的用户要求 */
+  userPrompt: string;
+  /** 可选服务名提示（重新生成时带入现有服务名） */
+  serviceHint?: string;
+  /** 从样例中提取的字段名集合 */
+  fieldNames: string[];
+  /** 已注册服务 canonicalName 列表 */
+  existingServices: string[];
+  /** 可用 ES 数据源（datasourceId 只能从这里选） */
+  datasources: { id: string; indices: string[] }[];
+  config: AppConfig;
+}
+
+/** 构建服务配置生成 prompt。 */
+export function buildServiceConfigPrompt(input: BuildServiceConfigPromptInput): { system: string; user: string } {
+  const parts: string[] = [];
+
+  parts.push('# 可用数据源（datasourceId 只能从这里选）');
+  if (input.datasources.length === 0) {
+    parts.push('(无已启用的 ES 数据源 —— 这种情况下请如实说明无法生成)');
+  } else {
+    for (const d of input.datasources) {
+      parts.push(`- ${d.id}｜默认索引: ${d.indices.join(', ')}`);
+    }
+  }
+  parts.push('');
+
+  parts.push('# 已注册服务（dependsOn/dependedBy 参考；canonicalName 不得与它们重复）');
+  parts.push(input.existingServices.length ? input.existingServices.join(', ') : '(空)');
+  parts.push('');
+
+  parts.push('# 从日志样例中识别到的字段名');
+  parts.push(input.fieldNames.length ? input.fieldNames.join(', ') : '(未能从样例中识别到字段名)');
+  parts.push('');
+
+  parts.push('# 用户要求');
+  if (input.serviceHint) {
+    parts.push(`目标服务（重新生成/更新）: ${input.serviceHint}`);
+  }
+  parts.push(UNTRUSTED_DATA_BEGIN);
+  parts.push(input.userPrompt.slice(0, 2000));
+  parts.push(UNTRUSTED_DATA_END);
+  parts.push('');
+
+  parts.push('# 日志样例');
+  parts.push(UNTRUSTED_DATA_BEGIN);
+  parts.push(input.logSample);
+  parts.push(UNTRUSTED_DATA_END);
+
+  return { system: SERVICE_CONFIG_SYSTEM, user: parts.join('\n') };
+}
+
+/**
+ * 清洗 AI 返回的服务配置草稿：
+ * 取 service 子对象、字符串 trim、null/空串归一为 undefined（交给 zod default）、
+ * 数组字段强制数组化。explanations 强制字符串数组。
+ */
+export function sanitizeGeneratedService(raw: unknown): { service: Record<string, unknown>; explanations: string[] } {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const svc = (o.service ?? {}) as Record<string, unknown>;
+  const explanations = Array.isArray(o.explanations) ? o.explanations.map((x) => String(x ?? '')).filter(Boolean) : [];
+
+  const ARRAY_FIELDS = new Set([
+    'aliases', 'indexPatterns', 'dependsOn', 'dependedBy', 'knownIssues',
+  ]);
+  const NESTED_ARRAY_FIELDS: Record<string, Set<string>> = {
+    fieldMapping: new Set(['timestamp', 'level', 'message', 'traceId', 'logger']),
+    deployment: new Set(['hostIds', 'containerNames']),
+  };
+
+  const cleanString = (v: unknown): string | undefined => {
+    if (v === null || v === undefined) return undefined;
+    const s = String(v).trim();
+    return s === '' || s === 'null' || s === 'undefined' ? undefined : s;
+  };
+
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(svc)) {
+    if (NESTED_ARRAY_FIELDS[k]) {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+      const nested: Record<string, unknown> = {};
+      for (const [nk, nv] of Object.entries(v as Record<string, unknown>)) {
+        if (NESTED_ARRAY_FIELDS[k].has(nk)) {
+          const arr = Array.isArray(nv) ? nv : nv === null || nv === undefined || nv === '' ? [] : [nv];
+          const cleaned = arr.map((x) => cleanString(x)).filter((x): x is string => typeof x === 'string');
+          if (cleaned.length) nested[nk] = cleaned;
+        } else if (nk === 'port') {
+          const n = Number(nv);
+          if (Number.isFinite(n) && n > 0) nested[nk] = Math.floor(n);
+        } else {
+          const s = cleanString(nv);
+          if (s !== undefined) nested[nk] = s;
+        }
+      }
+      out[k] = nested;
+      continue;
+    }
+    if (k === 'prometheusLabels') {
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const labels: Record<string, string> = {};
+        for (const [lk, lv] of Object.entries(v as Record<string, unknown>)) {
+          const s = cleanString(lv);
+          if (s !== undefined) labels[lk] = s;
+        }
+        if (Object.keys(labels).length) out[k] = labels;
+      }
+      continue;
+    }
+    if (k === 'knownIssues') {
+      const arr = Array.isArray(v) ? v : [];
+      out[k] = arr
+        .filter((ki) => ki && typeof ki === 'object')
+        .map((ki) => {
+          const item: Record<string, unknown> = {};
+          for (const [kk, kv] of Object.entries(ki as Record<string, unknown>)) {
+            const s = cleanString(kv);
+            if (s !== undefined) item[kk] = s;
+          }
+          return item;
+        })
+        .filter((ki) => typeof ki.pattern === 'string');
+      continue;
+    }
+    if (ARRAY_FIELDS.has(k)) {
+      const arr = Array.isArray(v) ? v : v === null || v === undefined || v === '' ? [] : [v];
+      out[k] = arr.map((x) => cleanString(x)).filter((x): x is string => typeof x === 'string');
+      continue;
+    }
+    const s = cleanString(v);
+    if (s !== undefined) out[k] = s;
+  }
+
+  return { service: out, explanations };
+}

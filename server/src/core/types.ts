@@ -150,3 +150,34 @@ export interface AuditEntry {
   target: string;
   detail: Record<string, unknown>;
 }
+
+// ---------------------------------------------------------------------------
+// AI 配置生成记录（「这个配置为什么会变成这样」的完整证据链）
+// ---------------------------------------------------------------------------
+export type AiConfigGenerationStatus = 'draft' | 'saved' | 'discarded';
+
+export interface AiConfigGeneration {
+  id: string;
+  createdAt: string;
+  /** 操作者标识（请求体带入，可伪造属已知限制，与 feedback.actor 同级） */
+  actor: string;
+  serviceName: string;
+  status: AiConfigGenerationStatus;
+  /** 脱敏后、截断后的日志样例 */
+  logSample: string;
+  /** 脱敏后的用户要求 */
+  userPrompt: string;
+  /** 实际模型名 */
+  model: string | null;
+  /** AI 原始输出（清洗前） */
+  aiRawOutput: string | null;
+  /** 清洗后的草稿 */
+  draftJson: unknown | null;
+  /** 用户编辑 diff：[{path, from, to}]，超 50 条截断 */
+  userEditsDiff: { path: string; from: unknown; to: unknown }[] | null;
+  /** 最终保存的配置 */
+  finalJson: unknown | null;
+  /** 校验结果 */
+  validation: { errors: string[]; warnings: string[] } | null;
+  tokensUsed: { prompt: number; completion: number } | null;
+}

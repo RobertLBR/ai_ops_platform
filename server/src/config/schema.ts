@@ -137,7 +137,7 @@ const KnownIssueSchema = z.object({
   sop: z.string().optional().default(''),
 });
 
-const ServiceSchema = z.object({
+export const ServiceSchema = z.object({
   canonicalName: z.string(),
   displayName: z.string().optional().default(''),
   aliases: z.array(z.string()).default([]),

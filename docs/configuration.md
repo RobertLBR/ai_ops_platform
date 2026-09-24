@@ -600,7 +600,7 @@ LLM 未返回合法 JSON：Unterminated string in JSON at position 6280
 ## 接口一览
 
 默认前缀 `/api`。若配置了 `server.apiToken`，除 `/health` 外均需
-`Authorization: Bearer <token>`（或 `?token=`）。
+`Authorization: Bearer <token>`。
 
 ### 健康与元信息
 
@@ -660,6 +660,31 @@ curl -X POST http://<server-host>:3000/api/security/check-command \
   -d '{"command":"rm -rf /"}'
 # → {"allowed":false,"reason":"命令不在白名单内，已拒绝：rm -rf /", ...}
 ```
+
+### 实时监控
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|---|---|---|---|
+| GET | `/api/monitor/snapshot` | 监控聚合快照：最近 20 条告警 + 进行中/最近完成 5 条诊断（轻字段）+ 数据源健康（60s 惰性 TTL 缓存） | ✅ |
+
+- 供 Web 工作台右上角「实时监控」开关使用（默认 OFF，OFF 时前端零请求）。
+- 数据源健康探测失败不报错，返回上次缓存 + `stale: true`；探测频率全进程 ≤ 1 次/60s。
+- 该端点只读 SQLite + 内存缓存，**不经过 LLM**，开监控永不产生 AI 费用。
+
+### AI 服务配置生成
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|---|---|---|---|
+| POST | `/api/ai-config/analyze` | 调 LLM（light 档）生成服务配置草稿。**限流 10 次/分钟**；日志样例 ≤50 行 / ≤8KB（连续重复行折叠），出网前过脱敏 | ✅ |
+| POST | `/api/ai-config/validate` | 纯本地三层校验（未知键白名单 + ServiceSchema + B1-B8 业务规则），免费，供编辑期实时调用 | ✅ |
+| POST | `/api/ai-config/save` | 服务端重校验 → 备份（`config.yaml.bak.<时间戳>`，留 10 份）→ CST 往返写回（保注释与 `${ENV}` 占位符）→ 内存热生效 | ✅ |
+| GET | `/api/ai-config/generations?service=&limit=` | 生成谱系列表（大字段裁剪） | ✅ |
+| GET | `/api/ai-config/generations/:id` | 单条生成记录全文（样例/原始输出/diff） | ✅ |
+
+- 热生效边界：新服务的 `datasourceId` 必须属于**已启用**的 ES 源（引用现有数据源即可热生效；
+  新增数据源仍需重启）。save 响应中 `restartRequired` 当前恒为 `false`。
+- 审计链：`audit_log(action='ai_config.saved') → generationId → ai_config_generations 单行`
+  （谁/何时/原始样例/AI 原始输出/用户改了什么/最终配置/校验结果）；文件级回滚用 `config.yaml.bak.*`。
 
 ---
 

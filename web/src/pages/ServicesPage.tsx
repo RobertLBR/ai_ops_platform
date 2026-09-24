@@ -10,12 +10,15 @@
  * 所以这一页配置错了，后面诊断全部跑偏。
  */
 
-import { Card, Table, Tag, Space, Typography, Alert, Button, Collapse, Descriptions, Row, Col, Tooltip, Divider } from 'antd';
-import { ReloadOutlined, CheckCircleOutlined, CloseCircleOutlined, LinkOutlined } from '@ant-design/icons';
+import { useState } from 'react';
+import { Card, Table, Tag, Space, Typography, Alert, Button, Collapse, Descriptions, Drawer, Row, Col, Tooltip, Divider, App } from 'antd';
+import { ReloadOutlined, CheckCircleOutlined, CloseCircleOutlined, LinkOutlined, RobotOutlined, HistoryOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import { api } from '../api/client';
-import type { ServiceInfo } from '../api/types';
+import dayjs from 'dayjs';
+import { api, ApiError } from '../api/client';
+import type { AiGenerationDetail, AiGenerationListItem, ServiceInfo } from '../api/types';
 import { useApi } from '../hooks/useApi';
+import AiConfigDialog from '../components/AiConfigDialog';
 
 const { Text, Paragraph } = Typography;
 
@@ -78,9 +81,116 @@ function DsHealthTag({ dsId, liveMap }: { dsId: string; liveMap: Record<string, 
   );
 }
 
+/** 「生成记录」抽屉：按服务名查生成谱系，行内可查看单条全文 */
+function GenerationsDrawer({ service, onClose, onUnauthorized }: { service: string; onClose: () => void; onUnauthorized: () => void }) {
+  const { modal } = App.useApp();
+  const { data, loading } = useApi(() => api.listAiGenerations(service, 100), [service], onUnauthorized);
+
+  const showDetail = async (id: string) => {
+    try {
+      const g: AiGenerationDetail = await api.getAiGeneration(id);
+      modal.info({
+        title: `生成记录 ${g.id}`,
+        width: 760,
+        content: (
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {dayjs(g.createdAt).format('YYYY-MM-DD HH:mm:ss')} · 操作者 {g.actor} · 模型 {g.model ?? '-'} · 状态 {g.status}
+            </Text>
+            <div>
+              <Text strong style={{ fontSize: 13 }}>用户要求</Text>
+              <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, fontSize: 12, maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{g.userPrompt}</pre>
+            </div>
+            <div>
+              <Text strong style={{ fontSize: 13 }}>日志样例（已脱敏）</Text>
+              <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, fontSize: 12, maxHeight: 160, overflow: 'auto' }}>{g.logSample}</pre>
+            </div>
+            {g.userEditsDiff && g.userEditsDiff.length > 0 && (
+              <div>
+                <Text strong style={{ fontSize: 13 }}>用户编辑 diff（{g.userEditsDiff.length} 处）</Text>
+                <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, fontSize: 12, maxHeight: 160, overflow: 'auto' }}>
+                  {g.userEditsDiff.map((d) => `${d.path}: ${JSON.stringify(d.from)} → ${JSON.stringify(d.to)}`).join('\n')}
+                </pre>
+              </div>
+            )}
+            {g.aiRawOutput && (
+              <div>
+                <Text strong style={{ fontSize: 13 }}>AI 原始输出</Text>
+                <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, fontSize: 12, maxHeight: 200, overflow: 'auto' }}>{g.aiRawOutput}</pre>
+              </div>
+            )}
+          </Space>
+        ),
+      });
+    } catch (e) {
+      const err = e as ApiError;
+      if (err.status === 401) onUnauthorized();
+    }
+  };
+
+  const columns: ColumnsType<AiGenerationListItem> = [
+    { title: '时间', dataIndex: 'createdAt', width: 110, render: (v: string) => dayjs(v).format('MM-DD HH:mm') },
+    { title: '操作者', dataIndex: 'actor', width: 80 },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      width: 80,
+      render: (v: string) => <Tag color={v === 'saved' ? 'green' : v === 'draft' ? 'blue' : 'default'}>{v === 'saved' ? '已保存' : v === 'draft' ? '草稿' : v}</Tag>,
+    },
+    { title: '模型', dataIndex: 'model', width: 130, render: (v: string | null) => <Text style={{ fontSize: 12 }}>{v ?? '-'}</Text> },
+    {
+      title: '校验',
+      width: 100,
+      render: (_: unknown, r) => {
+        const errs = r.validation?.errors.length ?? 0;
+        const warns = r.validation?.warnings.length ?? 0;
+        return (
+          <Space size={4}>
+            {errs > 0 ? <Tag color="red">{errs} 错</Tag> : <Tag color="green">0 错</Tag>}
+            {warns > 0 && <Tag color="orange">{warns} 警</Tag>}
+          </Space>
+        );
+      },
+    },
+    {
+      title: 'tokens',
+      width: 80,
+      render: (_: unknown, r) => (r.tokensUsed ? r.tokensUsed.prompt + r.tokensUsed.completion : '-'),
+    },
+    {
+      title: '操作',
+      width: 80,
+      render: (_: unknown, r) => (
+        <Button type="link" size="small" onClick={() => void showDetail(r.id)}>
+          详情
+        </Button>
+      ),
+    },
+  ];
+
+  return (
+    <Drawer title={`生成记录 — ${service}`} width={720} open onClose={onClose}>
+      <Table<AiGenerationListItem>
+        rowKey="id"
+        size="small"
+        loading={loading}
+        columns={columns}
+        dataSource={data?.items ?? []}
+        pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+        locale={{ emptyText: '该服务暂无 AI 生成记录' }}
+      />
+    </Drawer>
+  );
+}
+
 export default function ServicesPage({ onUnauthorized }: Props) {
   const { data, loading, error, reload } = useApi(() => api.listServices(), [], onUnauthorized);
   const { data: health } = useApi(() => api.datasourceHealth(), [], onUnauthorized);
+
+  // AI 配置生成对话框与生成记录抽屉
+  const [aiDialogOpen, setAiDialogOpen] = useState(false);
+  const [regenerateTarget, setRegenerateTarget] = useState<ServiceInfo | null>(null);
+  const [drawerService, setDrawerService] = useState<string | null>(null);
 
   const liveMap = buildLiveMap(health?.live ?? {});
   const dsCfg = health?.config;
@@ -184,6 +294,28 @@ export default function ServicesPage({ onUnauthorized }: Props) {
       sorter: (a, b) => a.knownIssueCount - b.knownIssueCount,
       render: (v: number) =>
         v > 0 ? <Tag color="orange">{v} 条</Tag> : <Text type="secondary">-</Text>,
+    },
+    {
+      title: '操作',
+      width: 190,
+      render: (_: unknown, r) => (
+        <Space size={4}>
+          <Button
+            type="link"
+            size="small"
+            icon={<RobotOutlined />}
+            onClick={() => {
+              setRegenerateTarget(r);
+              setAiDialogOpen(true);
+            }}
+          >
+            AI 重新生成
+          </Button>
+          <Button type="link" size="small" icon={<HistoryOutlined />} onClick={() => setDrawerService(r.canonicalName)}>
+            生成记录
+          </Button>
+        </Space>
+      ),
     },
   ];
 
@@ -320,7 +452,19 @@ export default function ServicesPage({ onUnauthorized }: Props) {
           </Space>
         }
         extra={
-          <Button icon={<ReloadOutlined />} onClick={reload}>刷新</Button>
+          <Space>
+            <Button
+              type="primary"
+              icon={<RobotOutlined />}
+              onClick={() => {
+                setRegenerateTarget(null);
+                setAiDialogOpen(true);
+              }}
+            >
+              AI 生成配置
+            </Button>
+            <Button icon={<ReloadOutlined />} onClick={reload}>刷新</Button>
+          </Space>
         }
       >
         {error && <Alert type="error" showIcon message="加载失败" description={error} style={{ marginBottom: 16 }} />}
@@ -348,11 +492,27 @@ export default function ServicesPage({ onUnauthorized }: Props) {
               AI 诊断时依赖这张表把口语化服务名映射到真实索引/指标/主机。<Text code>aliases</Text> 越全，识别越准；
               <Text code>dependsOn/dependedBy</Text> 帮助 AI 沿依赖链定位上游故障；
               <Text code>knownIssues</Text> 是你沉淀的排障经验，会让 AI 优先命中已知问题而非从零推理。
-              修改后需重启后端生效。
+              手工修改 config.yaml 需重启后端生效；通过「AI 生成配置」保存的条目立即热生效（写前自动备份）。
             </span>
           }
         />
       </Card>
+
+      {/* AI 生成配置对话框（新增 / 行内重新生成共用） */}
+      <AiConfigDialog
+        open={aiDialogOpen}
+        onClose={() => setAiDialogOpen(false)}
+        onSaved={reload}
+        onUnauthorized={onUnauthorized}
+        existingServices={(data?.items ?? []).map((s) => s.canonicalName)}
+        datasources={esAll.filter((d) => d.enabled).map((d) => ({ id: d.id }))}
+        regenerateTarget={regenerateTarget}
+      />
+
+      {/* 生成记录抽屉 */}
+      {drawerService && (
+        <GenerationsDrawer service={drawerService} onClose={() => setDrawerService(null)} onUnauthorized={onUnauthorized} />
+      )}
     </Space>
   );
 }
