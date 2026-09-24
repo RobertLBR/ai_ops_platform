@@ -18,6 +18,8 @@ import {
   ApiOutlined,
 } from '@ant-design/icons';
 import { api, ApiError, getToken, setToken } from './api/client';
+import { useMonitor } from './hooks/useMonitor';
+import MonitorSwitch from './components/MonitorSwitch';
 import DiagnosisList from './pages/DiagnosisList';
 import DiagnosisDetail from './pages/DiagnosisDetail';
 import AskPage from './pages/AskPage';
@@ -105,6 +107,14 @@ export default function App() {
     setTokenModalOpen(true);
   }, []);
 
+  // 实时监控状态引擎（默认 OFF；ON 时仅 leader tab 每 5s 轮询 /monitor/snapshot）
+  const monitor = useMonitor(onApiUnauthorized);
+  const activeCount = (monitor.snapshot?.activeDiagnoses ?? []).filter(
+    (t) => t.status !== 'done' && t.status !== 'failed',
+  ).length;
+  // 快照版本号：OFF 时恒为 0（页面行为与现状完全一致），ON 时每帧快照 +1 触发页面 reload
+  const liveTick = monitor.enabled ? monitor.lastPolledAt ?? 0 : 0;
+
   const headerRight = useMemo(
     () => (
       <Space size="middle">
@@ -114,6 +124,7 @@ export default function App() {
           </Tooltip>
         )}
         {backendUp === true && <Tag color="green">后端在线 {version && `v${version}`}</Tag>}
+        <MonitorSwitch enabled={monitor.enabled} onChange={monitor.setEnabled} activeCount={activeCount} failing={monitor.failing} />
         <Button
           size="small"
           icon={<KeyOutlined />}
@@ -133,7 +144,7 @@ export default function App() {
         </Button>
       </Space>
     ),
-    [backendUp, version],
+    [backendUp, version, monitor.enabled, monitor.setEnabled, monitor.failing, activeCount],
   );
 
   return (
@@ -186,7 +197,7 @@ export default function App() {
             />
           )}
 
-          {state.page === 'metrics' && <MetricsDashboard onUnauthorized={onApiUnauthorized} onNavigate={navigate} />}
+          {state.page === 'metrics' && <MetricsDashboard onUnauthorized={onApiUnauthorized} onNavigate={navigate} liveTick={liveTick} />}
           {state.page === 'ask' && (
             <AskPage
               onUnauthorized={onApiUnauthorized}
@@ -194,18 +205,19 @@ export default function App() {
             />
           )}
           {state.page === 'diagnoses' && (
-            <DiagnosisList onUnauthorized={onApiUnauthorized} onOpen={(id) => navigate('detail', id)} />
+            <DiagnosisList onUnauthorized={onApiUnauthorized} onOpen={(id) => navigate('detail', id)} liveTick={liveTick} />
           )}
           {state.page === 'detail' && state.detailId && (
             <DiagnosisDetail
               id={state.detailId}
               onUnauthorized={onApiUnauthorized}
               onBack={() => navigate('diagnoses')}
+              liveTick={liveTick}
             />
           )}
           {state.page === 'services' && <ServicesPage onUnauthorized={onApiUnauthorized} />}
           {state.page === 'alerts' && (
-            <AlertsPage onUnauthorized={onApiUnauthorized} onOpen={(id) => navigate('detail', id)} />
+            <AlertsPage onUnauthorized={onApiUnauthorized} onOpen={(id) => navigate('detail', id)} liveTick={liveTick} />
           )}
           {state.page === 'audit' && <AuditPage onUnauthorized={onApiUnauthorized} />}
         </Content>

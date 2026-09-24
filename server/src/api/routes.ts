@@ -17,15 +17,21 @@ import { AppConfig, resolveService } from '../config/schema';
 import { Database } from '../storage/database';
 import { DiagnosisEngine } from '../core/diagnosis-engine';
 import { Redactor } from '../core/redaction';
+import { LlmRouter } from '../ai/llm-router';
 import { parseInboundAlerts, severityAtLeast } from './alert-parser';
+import { createMonitorRouter } from './monitor';
+import { createAiConfigRouter } from './ai-config';
 import { InboundAlert } from '../core/types';
 import { CommandGuard } from '../datasources/ssh';
 import { logger } from '../utils/logger';
 
 export interface ApiContext {
   config: AppConfig;
+  /** 配置文件实际路径（AI 配置写回用） */
+  configPath: string;
   db: Database;
   engine: DiagnosisEngine;
+  llm: LlmRouter;
   /** 脱敏器（告警原文落库前的合规闸口） */
   redactor: Redactor;
   /** 进程启动时间，用于 uptime */
@@ -37,7 +43,7 @@ export interface ApiContext {
 /** Bearer Token 鉴权中间件（apiToken 为空时放行，仅限内网自用）。
  *  注意：只认 Authorization header；不再支持 ?token= query 传参
  *  （query 会进访问日志/浏览器历史，等同于明文泄露）。 */
-function authMiddleware(config: AppConfig) {
+export function authMiddleware(config: AppConfig) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const token = config.server.apiToken;
     if (!token) {
@@ -65,6 +71,18 @@ function verifyWebhookSecret(config: AppConfig, req: Request): boolean {
 export function createApiRouter(ctx: ApiContext): Router {
   const router = Router();
   const { config, db, engine, redactor } = ctx;
+
+  // -------------------------------------------------------------------------
+  // 子路由（实时监控聚合 / AI 配置生成），全部带鉴权
+  // -------------------------------------------------------------------------
+  router.use('/monitor', authMiddleware(config), createMonitorRouter({ db, engine }));
+  router.use('/ai-config', authMiddleware(config), createAiConfigRouter({
+    config,
+    configPath: ctx.configPath,
+    db,
+    llm: ctx.llm,
+    redactor,
+  }));
 
   // -------------------------------------------------------------------------
   // 健康与元信息（不鉴权，供容器 healthcheck 使用）

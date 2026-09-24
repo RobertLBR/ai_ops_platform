@@ -161,3 +161,91 @@ export interface SchedulerStatus {
   currentlyRunning: boolean;
   reportWebhookConfigured: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// 实时监控快照（GET /api/monitor/snapshot）
+// ---------------------------------------------------------------------------
+
+export interface MonitorDiagnosisItem {
+  id: string;
+  status: DiagnosisStatus;
+  trigger: DiagnosisTrigger;
+  question: string;
+  serviceName: string | null;
+  createdAt: string;
+  durationMs: number | null;
+  severity: Severity | null;
+  summary: string | null;
+  error: string | null;
+}
+
+export interface MonitorSnapshot {
+  serverTime: string;
+  alerts: InboundAlert[];
+  activeDiagnoses: MonitorDiagnosisItem[];
+  datasourceHealth: {
+    cachedAt: string;
+    ttlSeconds: number;
+    stale: boolean;
+    data: Record<string, unknown> | null;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// AI 配置生成（/api/ai-config/*）
+// ---------------------------------------------------------------------------
+
+export interface AiValidateResult {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface AiAnalyzeResponse {
+  generationId: string;
+  draft: Record<string, unknown>;
+  explanations: string[];
+  errors: string[];
+  warnings: string[];
+  usage: { prompt: number; completion: number; model: string };
+}
+
+export interface AiSaveResponse {
+  ok: boolean;
+  restartRequired: boolean;
+  backupPath: string;
+  warnings: string[];
+}
+
+export interface AiGenerationListItem {
+  id: string;
+  createdAt: string;
+  actor: string;
+  serviceName: string;
+  status: 'draft' | 'saved' | 'discarded';
+  model: string | null;
+  logSamplePreview: string;
+  userPrompt: string;
+  validation: { errors: string[]; warnings: string[] } | null;
+  tokensUsed: { prompt: number; completion: number } | null;
+  hasDraft: boolean;
+  hasDiff: boolean;
+  hasFinal: boolean;
+}
+
+export interface AiGenerationDetail {
+  id: string;
+  createdAt: string;
+  actor: string;
+  serviceName: string;
+  status: 'draft' | 'saved' | 'discarded';
+  logSample: string;
+  userPrompt: string;
+  model: string | null;
+  aiRawOutput: string | null;
+  draftJson: unknown;
+  userEditsDiff: { path: string; from: unknown; to: unknown }[] | null;
+  finalJson: unknown;
+  validation: { errors: string[]; warnings: string[] } | null;
+  tokensUsed: { prompt: number; completion: number } | null;
+}

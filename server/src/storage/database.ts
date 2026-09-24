@@ -14,7 +14,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import * as fs from 'fs';
 import * as path from 'path';
-import { DiagnosisTask, InboundAlert, AuditEntry } from '../core/types';
+import { DiagnosisTask, InboundAlert, AuditEntry, AiConfigGeneration } from '../core/types';
 import { logger } from '../utils/logger';
 
 const SCHEMA = `
@@ -96,6 +96,27 @@ CREATE TABLE IF NOT EXISTS fault_cases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cases_service ON fault_cases(service_name);
+
+-- AI 配置生成记录（「这个配置为什么会变成这样」的完整证据链）
+CREATE TABLE IF NOT EXISTS ai_config_generations (
+  id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  service_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  log_sample TEXT NOT NULL,
+  user_prompt TEXT NOT NULL,
+  model TEXT,
+  ai_raw_output TEXT,
+  draft_json TEXT,
+  user_edits_diff TEXT,
+  final_json TEXT,
+  validation TEXT,
+  tokens_used TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_aiconfig_service ON ai_config_generations(service_name);
+CREATE INDEX IF NOT EXISTS idx_aiconfig_created ON ai_config_generations(created_at DESC);
 `;
 
 export class Database {
@@ -448,6 +469,97 @@ export class Database {
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
     return scored.map((s) => ({ ...s.c, _score: s.score }));
+  }
+
+  // -------------------------------------------------------------------------
+  // AI 配置生成记录
+  // -------------------------------------------------------------------------
+
+  insertGeneration(g: AiConfigGeneration): void {
+    this.db
+      .prepare(
+        `INSERT INTO ai_config_generations
+         (id, created_at, actor, service_name, status, log_sample, user_prompt, model,
+          ai_raw_output, draft_json, user_edits_diff, final_json, validation, tokens_used)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        g.id, g.createdAt, g.actor, g.serviceName, g.status, g.logSample, g.userPrompt,
+        g.model, g.aiRawOutput,
+        g.draftJson !== null ? JSON.stringify(g.draftJson) : null,
+        g.userEditsDiff !== null ? JSON.stringify(g.userEditsDiff) : null,
+        g.finalJson !== null ? JSON.stringify(g.finalJson) : null,
+        g.validation !== null ? JSON.stringify(g.validation) : null,
+        g.tokensUsed !== null ? JSON.stringify(g.tokensUsed) : null,
+      );
+  }
+
+  updateGeneration(
+    id: string,
+    patch: Partial<Pick<AiConfigGeneration, 'status' | 'draftJson' | 'userEditsDiff' | 'finalJson' | 'validation'>>,
+  ): void {
+    const colMap: Record<string, string> = {
+      status: 'status',
+      draftJson: 'draft_json',
+      userEditsDiff: 'user_edits_diff',
+      finalJson: 'final_json',
+      validation: 'validation',
+    };
+    const json = new Set(['draftJson', 'userEditsDiff', 'finalJson', 'validation']);
+    const cols: string[] = [];
+    const vals: unknown[] = [];
+    for (const [k, v] of Object.entries(patch)) {
+      const col = colMap[k];
+      if (!col) continue;
+      cols.push(`${col} = ?`);
+      vals.push(json.has(k) ? (v !== null && v !== undefined ? JSON.stringify(v) : null) : (v as string));
+    }
+    if (cols.length === 0) return;
+    vals.push(id);
+    this.db.prepare(`UPDATE ai_config_generations SET ${cols.join(', ')} WHERE id = ?`).run(...(vals as never[]));
+  }
+
+  private rowToGeneration(row: Record<string, unknown>): AiConfigGeneration {
+    const parse = <T>(v: unknown): T | null => {
+      if (v === null || v === undefined || v === '') return null;
+      try {
+        return JSON.parse(String(v)) as T;
+      } catch {
+        return null;
+      }
+    };
+    return {
+      id: String(row.id),
+      createdAt: String(row.created_at),
+      actor: String(row.actor ?? ''),
+      serviceName: String(row.service_name ?? ''),
+      status: row.status as AiConfigGeneration['status'],
+      logSample: String(row.log_sample ?? ''),
+      userPrompt: String(row.user_prompt ?? ''),
+      model: (row.model as string) ?? null,
+      aiRawOutput: (row.ai_raw_output as string) ?? null,
+      draftJson: parse(row.draft_json),
+      userEditsDiff: parse(row.user_edits_diff),
+      finalJson: parse(row.final_json),
+      validation: parse(row.validation),
+      tokensUsed: parse(row.tokens_used),
+    };
+  }
+
+  getGeneration(id: string): AiConfigGeneration | null {
+    const row = this.db.prepare('SELECT * FROM ai_config_generations WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToGeneration(row) : null;
+  }
+
+  listGenerations(serviceName?: string, limit = 50): AiConfigGeneration[] {
+    const rows = serviceName
+      ? (this.db
+          .prepare('SELECT * FROM ai_config_generations WHERE service_name = ? ORDER BY created_at DESC LIMIT ?')
+          .all(serviceName, limit) as Record<string, unknown>[])
+      : (this.db
+          .prepare('SELECT * FROM ai_config_generations ORDER BY created_at DESC LIMIT ?')
+          .all(limit) as Record<string, unknown>[]);
+    return rows.map((r) => this.rowToGeneration(r));
   }
 
   // -------------------------------------------------------------------------

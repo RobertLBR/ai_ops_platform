@@ -27,11 +27,13 @@ const { Text, Title, Paragraph } = Typography;
 interface Props {
   onUnauthorized: () => void;
   onNavigate: (page: 'ask' | 'diagnoses') => void;
+  /** 实时监控快照版本号（OFF 时恒为 0，行为与现状一致） */
+  liveTick?: number;
 }
 
-export default function MetricsDashboard({ onUnauthorized, onNavigate }: Props) {
-  const { data, loading, error, reload } = useApi<MetricsSummary>(() => api.metricsSummary(), [], onUnauthorized);
-  const { data: recent } = useApi(() => api.listDiagnoses({ limit: 8 }), [], onUnauthorized);
+export default function MetricsDashboard({ onUnauthorized, onNavigate, liveTick = 0 }: Props) {
+  const { data, loading, error, reload } = useApi<MetricsSummary>(() => api.metricsSummary(), [liveTick], onUnauthorized);
+  const { data: recent } = useApi(() => api.listDiagnoses({ limit: 8 }), [liveTick], onUnauthorized);
 
   if (error) {
     return (

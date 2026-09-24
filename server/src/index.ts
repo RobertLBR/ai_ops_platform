@@ -134,7 +134,7 @@ async function main(): Promise<void> {
   });
 
   const startedAt = Date.now();
-  app.use('/api', createApiRouter({ config, db, engine, redactor, startedAt, version: VERSION }));
+  app.use('/api', createApiRouter({ config, configPath, db, engine, llm, redactor, startedAt, version: VERSION }));
 
   // 手动触发一次日报（运维调试用）
   const scheduler = new Scheduler(config, db, engine, llm);

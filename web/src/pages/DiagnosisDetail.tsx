@@ -13,7 +13,7 @@
  * 处置命令区永久标注「系统不会自动执行」，强化只读边界认知。
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Card, Descriptions, Tag, Space, Typography, Button, Alert, Collapse, Table,
   Radio, Input, Divider, Statistic, Row, Col, Tooltip, Empty, App,
@@ -34,14 +34,22 @@ interface Props {
   id: string;
   onUnauthorized: () => void;
   onBack: () => void;
+  /** 实时监控快照版本号（OFF 时恒为 0，行为与现状一致） */
+  liveTick?: number;
 }
 
-export default function DiagnosisDetail({ id, onUnauthorized, onBack }: Props) {
+export default function DiagnosisDetail({ id, onUnauthorized, onBack, liveTick = 0 }: Props) {
   const { message, modal } = App.useApp();
   const [verdict, setVerdict] = useState<'correct' | 'partial' | 'wrong'>('correct');
   const [comment, setComment] = useState('');
 
-  const { data: task, loading, error, reload } = useApi<DiagnosisTask>(() => api.getDiagnosis(id), [id], onUnauthorized);
+  // 仅当任务处于非终态时才跟随实时快照自动刷新（终态任务不再轮询）
+  const [tickGate, setTickGate] = useState(0);
+  const { data: task, loading, error, reload } = useApi<DiagnosisTask>(() => api.getDiagnosis(id), [id, tickGate], onUnauthorized);
+  const isActive = task ? task.status === 'pending' || task.status === 'collecting' || task.status === 'analyzing' : true;
+  useEffect(() => {
+    if (liveTick && isActive) setTickGate(liveTick);
+  }, [liveTick, isActive]);
 
   const feedbackMut = useMutation(
     (v: 'correct' | 'partial' | 'wrong', c: string) => api.submitFeedback(id, v, c),
