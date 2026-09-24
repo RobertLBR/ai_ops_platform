@@ -463,8 +463,10 @@ diagnosis:
     samplesPerTemplate: 3
     # 基线对比：统计"正常频率"的历史天数
     baselineDays: 7
-  # 只输出这些日志级别（降噪）
-  levelFilter: [ERROR, WARN, FATAL]
+  # 只输出这些日志级别（降噪）。空数组 = 不过滤，拉取全部级别。
+  # 本环境日志无独立、可过滤的 level 字段（按 message 文本兜底解析），故保持为空；
+  # 非空会令 diagnosis 按 level 做 terms 查询而查不到日志，并触发 AI 配置生成 B4 的 warning。
+  levelFilter: []
   # 单次诊断最多送入大模型的字符数
   maxContextChars: 120000
 

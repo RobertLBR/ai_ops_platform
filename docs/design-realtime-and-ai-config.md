@@ -180,7 +180,11 @@ knownIssues[] 仅：pattern / category / severity / cause / sop
 | B1 | `fieldMapping.timestamp[0]` 与 `level[0]` 是**唯一参与 ES 查询的候选**，必须出现在日志样例中真实存在；在样例字段清单里找不到 → error | error |
 | B2 | `aliases` 必须包含中文名（若 displayName 为中文则必须含 displayName 本身）——resolveService 不匹配 displayName | error |
 | B3 | `indexPatterns` 非空 = 完全覆盖 datasource 级 indices（不合并）——若 indexPatterns 与 datasource.indices 无交集 → warning「该服务将查不到任何日志」 | warning |
-| B4 | 本环境实测约束：`diagnosis.levelFilter` 非空时 error（本环境 level 字段不可过滤）；datasource `maxDocs > 10000` 时 warning；`prometheusLabels.instance` 含反斜杠 → error | error/warning |
+| B4 | 本环境实测约束：`diagnosis.levelFilter` 非空时 **warning（不阻断保存）**（本环境 level 字段不可过滤，仅提示）；datasource `maxDocs > 10000` 时 warning；`prometheusLabels.instance` 含反斜杠 → error | warning/error |
+
+> 修订说明（对照 4bae9b4）：B4 原将 `levelFilter` 非空判定为 error 并阻断 `/api/ai-config/save`，
+> 但 `config.example.yaml` 与 `schema.ts` 默认值均为非空，导致新功能在自带示例配置下「开箱即废」。
+> 现降级为 warning——`levelFilter` 是诊断全局配置，与单条服务注册表无直接因果，不应阻断保存。
 | B5 | 禁止生成敏感值：任何字符串值匹配 password/secret/token/apiKey 样式，或形似真实密钥（长度>20 的高熵串出现在非 pattern 字段）→ error | error |
 | B6 | `knownIssues[].pattern` 必须能编译为合法 RegExp，且至少能在日志样例中命中 1 次（否则该 knownIssue 是臆造的）→ warning | warning |
 | B7 | canonicalName 必须符合 `^[a-z][a-z0-9-]*$`（与现有服务命名一致）；datasourceId 必须存在于 config.datasources.elasticsearch 且 enabled | error |
