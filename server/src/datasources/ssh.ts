@@ -172,7 +172,10 @@ export class CommandGuard {
     const lowered = cmd.toLowerCase();
     const ok = this.allowPrefixes.some((p) => {
       const lp = p.toLowerCase();
-      return lowered === lp || lowered.startsWith(lp + ' ') || lowered.startsWith(lp + '\t');
+      // 允许前缀后以：整串精确相等、空格（独立参数）、tab，或路径分隔符 '/' 接续。
+      // 末尾 '/' 用于「目录型白名单」如 `cat /var/log` 放行 `cat /var/log/app/error.log`；
+      // 真实路径边界仍由第 5 步 checkFileReadPaths 兜底（必须落在 allowedPathPrefixes 内）。
+      return lowered === lp || lowered.startsWith(lp + ' ') || lowered.startsWith(lp + '\t') || lowered.startsWith(lp + '/');
     });
     if (!ok) {
       return `命令不在白名单内，已拒绝：${cmd}`;
