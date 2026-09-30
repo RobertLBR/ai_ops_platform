@@ -119,7 +119,7 @@ export default function App() {
     () => (
       <Space size="middle">
         {backendUp === false && (
-          <Tooltip title="后端未响应，请确认服务已启动（默认 3000 端口）">
+          <Tooltip title="后端未响应，请确认服务已启动（默认 3003 端口）">
             <Tag color="red">后端离线</Tag>
           </Tooltip>
         )}

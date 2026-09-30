@@ -92,7 +92,7 @@ ai:
 ```yaml
 server:
   host: 0.0.0.0            # 容器内监听 0.0.0.0；裸机部署可改 127.0.0.1
-  port: 3000
+  port: 3003
   webRoot: web/dist        # 前端构建产物目录，相对项目根
   apiToken: ${AIOPS_API_TOKEN}   # 留空 = 不鉴权（仅限隔离内网）
   logLevel: info           # debug | info | warn | error
@@ -381,10 +381,9 @@ security:
 
 ### 数据出网合规
 
-```
-原始日志 ──▶ ① 脱敏(正则规则) ──▶ ② 压缩(模板化) ──▶ ③ 送模型
-               ↓ 审计                     ↓ 降量 1~2 个数量级
-          只记类型与次数
+```mermaid
+flowchart LR
+    A["原始日志"] --> B["① 脱敏<br/>正则规则"] --> C["② 压缩<br/>模板化"] --> D["③ 送模型（出网）"]
 ```
 
 - 脱敏在**压缩之前**执行，保证模板里也不含敏感信息
@@ -421,7 +420,7 @@ alerts:
 receivers:
   - name: 'ai-ops'
     webhook_configs:
-      - url: 'http://<server-host>:3000/api/webhook/alertmanager?secret=<your-secret>'
+      - url: 'http://<server-host>:3003/api/webhook/alertmanager?secret=<your-secret>'
         send_resolved: true
 ```
 
@@ -480,7 +479,7 @@ metrics:
 ```yaml
 server:
   host: 0.0.0.0
-  port: 3000
+  port: 3003
   webRoot: web/dist
   apiToken: ${AIOPS_API_TOKEN}
   logLevel: info
@@ -623,7 +622,7 @@ LLM 未返回合法 JSON：Unterminated string in JSON at position 6280
 发起诊断：
 
 ```bash
-curl -X POST http://<server-host>:3000/api/diagnoses \
+curl -X POST http://<server-host>:3003/api/diagnoses \
   -H 'Content-Type: application/json' \
   -d '{
     "question": "订单服务昨天下午开始大量报连接池不可用",
@@ -655,7 +654,7 @@ curl -X POST http://<server-host>:3000/api/diagnoses \
 ### 安全自检
 
 ```bash
-curl -X POST http://<server-host>:3000/api/security/check-command \
+curl -X POST http://<server-host>:3003/api/security/check-command \
   -H 'Content-Type: application/json' \
   -d '{"command":"rm -rf /"}'
 # → {"allowed":false,"reason":"命令不在白名单内，已拒绝：rm -rf /", ...}

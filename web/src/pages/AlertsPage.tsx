@@ -195,7 +195,7 @@ export default function AlertsPage({ onUnauthorized, onOpen, liveTick = 0 }: Pro
 {`receivers:
   - name: 'ai-ops'
     webhook_configs:
-      - url: 'http://<your-host>:3000/api/webhook/alertmanager?secret=<your-secret>'
+      - url: 'http://<your-host>:3003/api/webhook/alertmanager?secret=<your-secret>'
         send_resolved: true`}
           </pre>
           <Divider style={{ margin: '8px 0' }} />

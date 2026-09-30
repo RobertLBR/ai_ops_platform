@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 // 前端构建产物输出到 web/dist，由后端 Express 静态托管。
-// 开发模式下把 /api 代理到后端 3000 端口，避免跨域。
+// 开发模式下把 /api 代理到后端 3003 端口，避免跨域。
 export default defineConfig({
   plugins: [react()],
   build: {
@@ -25,7 +25,7 @@ export default defineConfig({
     host: '127.0.0.1',
     proxy: {
       '/api': {
-        target: process.env.VITE_API_TARGET ?? 'http://127.0.0.1:3000',
+        target: process.env.VITE_API_TARGET ?? 'http://127.0.0.1:3003',
         changeOrigin: true,
       },
     },

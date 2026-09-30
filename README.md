@@ -44,27 +44,31 @@
 
 ## 🏗️ 架构
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                  触发层                                       │
-│      手动提问  │  告警 Webhook  │  定时巡检                    │
-└───────────────────────────┬──────────────────────────────────┘
-                            ▼
-┌──────────────────────────────────────────────────────────────┐
-│                   诊断流水线（固定管道）                        │
-│                                                              │
-│  ① 解析服务 & 时间窗   ← 服务注册表（架构知识层）               │
-│  ② 并行只读取证        ← ES 日志 / Prometheus / SSH(白名单)     │
-│  ③ 脱敏闸口            ← 合规前置，压缩之前执行                 │
-│  ④ 压缩                ← 模板提取 → 聚类 → 基线对比             │
-│  ⑤ 注入知识            ← 已知问题 SOP + 相似案例               │
-│  ⑥ LLM 推理            → 结构化结论（事实/推断分离）            │
-└───────────────────────────┬──────────────────────────────────┘
-                            ▼
-┌──────────────────────────────────────────────────────────────┐
-│         Web 工作台（React）  ＋  存储层（内置 SQLite）          │
-│  成果看板·发起诊断·诊断记录·服务注册表·告警流水·审计日志         │
-└──────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph TRIGGER["触发层"]
+        direction LR
+        A1["手动提问"]
+        A2["告警 Webhook"]
+        A3["定时巡检"]
+    end
+
+    subgraph PIPELINE["诊断流水线（固定管道）"]
+        direction TB
+        B1["① 解析服务 & 时间窗<br/>来源：服务注册表（架构知识层）"]
+        B2["② 并行只读取证<br/>来源：ES 日志 / Prometheus / SSH（白名单）"]
+        B3["③ 脱敏闸口<br/>合规前置，早于压缩执行"]
+        B4["④ 压缩<br/>模板提取 → 聚类 → 基线对比"]
+        B5["⑤ 注入知识<br/>已知问题 SOP + 相似案例"]
+        B6["⑥ LLM 推理<br/>输出：结构化结论（事实 / 推断分离）"]
+        B1 --> B2 --> B3 --> B4 --> B5 --> B6
+    end
+
+    subgraph DELIVER["Web 工作台（React）＋ 存储层（内置 SQLite）"]
+        C1["成果看板 · 发起诊断 · 诊断记录<br/>服务注册表 · 告警流水 · 审计日志"]
+    end
+
+    TRIGGER --> PIPELINE --> DELIVER
 ```
 
 **技术栈**：Node.js 22 + TypeScript + Express ／ React 18 + antd 5 + Vite ／
@@ -92,7 +96,7 @@ docker compose ps                      # 查看状态
 docker compose logs -f ai-ops          # 跟踪日志
 ```
 
-访问 `http://<server-host>:3000` 即可。配置说明见
+访问 `http://<server-host>:3003` 即可（端口由 `config.yaml` 的 `server.port` 决定，默认 3003）。配置说明见
 📘 **[详细配置文档](docs/configuration.md)**。
 
 ### 方式二：本地开发
@@ -103,7 +107,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 
 npm run probe                          # 部署前自检：能否连上配置里的数据源
-npm run dev                            # 终端 A：后端（默认 3000）
+npm run dev                            # 终端 A：后端（默认 3003，见 server.port）
 npm run dev:web                        # 终端 B：前端（默认 5173）
 ```
 
@@ -115,7 +119,7 @@ docker tag ai-ops-platform:1.0.0 <your-registry>:5000/ai-ops-platform:1.0.0
 docker push <your-registry>:5000/ai-ops-platform:1.0.0
 
 # 目标服务器上运行
-docker run -d --name ai-ops -p 3000:3000 \
+docker run -d --name ai-ops -p 3003:3003 \
   -v /opt/ai-ops-platform/config.yaml:/app/config/config.yaml:ro \
   -v ai-ops-data:/app/data \
   --env-file /opt/ai-ops-platform/.env \
@@ -131,8 +135,8 @@ docker run -d --name ai-ops -p 3000:3000 \
 ### 验证安装
 
 ```bash
-curl http://<server-host>:3000/api/health          # → {"status":"ok",...}
-curl http://<server-host>:3000/api/datasources/health   # 数据源连通性
+curl http://<server-host>:3003/api/health          # → {"status":"ok",...}
+curl http://<server-host>:3003/api/datasources/health   # 数据源连通性
 node scripts/probe-connectivity.mjs                # 只读探测各数据源端口
 ```
 
@@ -144,8 +148,7 @@ node scripts/probe-connectivity.mjs                # 只读探测各数据源端
 |---|---|
 | 📊 成果看板 | 节省工时 / 结论有用率 / 告警降噪率 |
 | 💬 发起诊断 | 提问 + 选服务 + 时间窗，实时进度 |
-| 📋 诊断记录 | 历史诊断列表，可筛选、可跳转详情 |
-| 🔍 诊断详情 | 事实/推断分离展示，只读命令区，反馈与案例沉淀 |
+| 📋 诊断记录（含详情） | 历史诊断列表，可筛选、可跳转详情；详情页事实/推断分离、只读命令区、反馈与案例沉淀 |
 | 🗂️ 服务注册表 | 注册服务、依赖关系、已知问题 + 数据源连通性；**AI 生成配置**入口与生成记录谱系 |
 | 🚨 告警流水 | 入站告警，已关联诊断可一键跳转 |
 | 🔐 审计日志 | 只读边界证据，含动作类型图例 |
@@ -165,6 +168,7 @@ AI 建议的命令仅展示，代码中不存在"执行模型输出"的路径；
 
 | 文档 | 内容 |
 |---|---|
+| 📙 [产品使用手册](docs/user-guide.md) | 面向使用者的操作指南：登录、发起诊断、读懂结论、反馈沉淀、告警巡检、成果看板、FAQ |
 | 📘 [详细配置](docs/configuration.md) | `config.yaml` 逐段说明、环境变量、接口一览、常见配置坑 |
 | 📗 [服务注册表编写指南](docs/knowledge-base.md) | 决定诊断准不准的那张表怎么填 |
 | 📈 [项目进度](docs/progress.md) | 一期完成情况、验证记录、已知问题与二期规划 |
