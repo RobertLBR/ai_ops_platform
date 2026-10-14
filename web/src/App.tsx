@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Layout, Menu, Typography, Button, Modal, Input, Space, Tag, Tooltip, Alert } from 'antd';
+import { Layout, Menu, Typography, Button, Modal, Input, Space, Tag, Tooltip, Alert, Form, App as AntdApp } from 'antd';
 import {
   DashboardOutlined,
   FileSearchOutlined,
@@ -15,11 +15,13 @@ import {
   AlertOutlined,
   SafetyOutlined,
   KeyOutlined,
-  ApiOutlined,
+  LockOutlined,
+  LogoutOutlined,
 } from '@ant-design/icons';
-import { api, ApiError, getToken, setToken } from './api/client';
+import { api, ApiError, getToken, setToken, getSession, setSession, isLoggedIn } from './api/client';
 import { useMonitor } from './hooks/useMonitor';
 import MonitorSwitch from './components/MonitorSwitch';
+import LoginPage from './pages/LoginPage';
 import DiagnosisList from './pages/DiagnosisList';
 import DiagnosisDetail from './pages/DiagnosisDetail';
 import AskPage from './pages/AskPage';
@@ -59,6 +61,10 @@ export default function App() {
   const [tokenModalOpen, setTokenModalOpen] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
   const [unauthorized, setUnauthorized] = useState(false);
+  // Web 登录态：null = 校验中，false = 未登录（显示登录页），true = 已登录
+  const [loggedIn, setLoggedIn] = useState<boolean | null>(() => (isLoggedIn() ? null : false));
+  const [forceChangePwd, setForceChangePwd] = useState(false);
+  const [pwdModalOpen, setPwdModalOpen] = useState(false);
 
   const navigate = useCallback((page: PageKey, detailId?: string) => {
     window.location.hash = detailId ? `#/${page}/${encodeURIComponent(detailId)}` : `#/${page}`;
@@ -103,8 +109,55 @@ export default function App() {
   }, []);
 
   const onApiUnauthorized = useCallback(() => {
-    setUnauthorized(true);
-    setTokenModalOpen(true);
+    // 会话/令牌失效：优先回登录页（若登录体系启用），否则弹 Token 设置
+    if (isLoggedIn()) {
+      setSession('');
+      setLoggedIn(false);
+    } else {
+      setUnauthorized(true);
+      setTokenModalOpen(true);
+    }
+  }, []);
+
+  // 启动时校验登录会话（/auth/status），无效则进入登录页
+  useEffect(() => {
+    if (!isLoggedIn()) {
+      setLoggedIn(false);
+      return;
+    }
+    let cancelled = false;
+    api
+      .authStatus()
+      .then((s) => {
+        if (cancelled) return;
+        if (s.authenticated) {
+          setLoggedIn(true);
+          if (s.mustChangePassword) setForceChangePwd(true);
+        } else {
+          setSession('');
+          setLoggedIn(false);
+        }
+      })
+      .catch(() => {
+        // 网络异常时不强制登出，保持会话（后端离线时页面仍有提示）
+        if (!cancelled) setLoggedIn(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 登录成功回调：进入工作台；若仍在用默认密码则强制改密
+  const onLoginSuccess = useCallback((mustChange: boolean) => {
+    setLoggedIn(true);
+    if (mustChange) setForceChangePwd(true);
+  }, []);
+
+  // 退出登录：清会话回登录页
+  const onLogout = useCallback(() => {
+    setSession('');
+    setLoggedIn(false);
+    setForceChangePwd(false);
   }, []);
 
   // 实时监控状态引擎（默认 OFF；ON 时仅 leader tab 每 5s 轮询 /monitor/snapshot）
@@ -125,6 +178,9 @@ export default function App() {
         )}
         {backendUp === true && <Tag color="green">后端在线 {version && `v${version}`}</Tag>}
         <MonitorSwitch enabled={monitor.enabled} onChange={monitor.setEnabled} activeCount={activeCount} failing={monitor.failing} />
+        <Button size="small" icon={<LockOutlined />} onClick={() => setPwdModalOpen(true)}>
+          修改密码
+        </Button>
         <Button
           size="small"
           icon={<KeyOutlined />}
@@ -135,17 +191,19 @@ export default function App() {
         >
           API Token
         </Button>
-        <Button
-          size="small"
-          icon={<ApiOutlined />}
-          onClick={() => window.open('/api/health', '_blank')}
-        >
-          API
+        <Button size="small" icon={<LogoutOutlined />} onClick={onLogout}>
+          退出
         </Button>
       </Space>
     ),
-    [backendUp, version, monitor.enabled, monitor.setEnabled, monitor.failing, activeCount],
+    [backendUp, version, monitor.enabled, monitor.setEnabled, monitor.failing, activeCount, onLogout],
   );
+
+  // 启动期会话校验中：不渲染任何内容，避免闪登录页
+  if (loggedIn === null) return null;
+
+  // 未登录：只渲染登录页
+  if (!loggedIn) return <LoginPage onSuccess={onLoginSuccess} />;
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -185,6 +243,23 @@ export default function App() {
         </Header>
 
         <Content style={{ padding: 24, background: '#f5f5f5', overflow: 'auto' }}>
+          {forceChangePwd && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="安全提示：当前仍在使用默认密码"
+              description={
+                <Space>
+                  <Text>系统检测到管理员密码仍为初始默认值，存在被猜解风险，请尽快修改。</Text>
+                  <Button size="small" type="primary" onClick={() => setPwdModalOpen(true)}>
+                    立即修改
+                  </Button>
+                </Space>
+              }
+            />
+          )}
+
           {unauthorized && (
             <Alert
               type="warning"
@@ -269,6 +344,94 @@ export default function App() {
           </Button>
         </Space>
       </Modal>
+
+      <ChangePasswordModal
+        open={pwdModalOpen}
+        onClose={() => setPwdModalOpen(false)}
+        onNeedRelogin={() => {
+          setPwdModalOpen(false);
+          onLogout();
+        }}
+      />
     </Layout>
+  );
+}
+
+/** 修改密码弹窗：校验旧密码，成功后后端使全部会话失效 → 需重新登录。 */
+function ChangePasswordModal({
+  open,
+  onClose,
+  onNeedRelogin,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onNeedRelogin: () => void;
+}) {
+  const [form] = Form.useForm<{ currentPassword: string; newPassword: string; confirm: string }>();
+  const [loading, setLoading] = useState(false);
+  const { message } = AntdApp.useApp();
+
+  const submit = async () => {
+    try {
+      const values = await form.validateFields();
+      if (values.newPassword !== values.confirm) {
+        message.error('两次输入的新密码不一致');
+        return;
+      }
+      setLoading(true);
+      const r = await api.changePassword(values.currentPassword, values.newPassword);
+      if (r.ok) {
+        message.success('密码已修改，请使用新密码重新登录');
+        form.resetFields();
+        onNeedRelogin();
+      }
+    } catch (e) {
+      if (e && typeof e === 'object' && 'errorFields' in e) return; // 表单校验错误
+      const err = e as ApiError;
+      message.error(err.message || '修改失败，请稍后重试');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="修改管理员密码"
+      open={open}
+      onCancel={() => {
+        form.resetFields();
+        onClose();
+      }}
+      onOk={submit}
+      okText="确认修改"
+      cancelText="取消"
+      confirmLoading={loading}
+      destroyOnClose
+    >
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="修改成功后所有登录会话立即失效，需要用新密码重新登录。"
+      />
+      <Form form={form} layout="vertical" requiredMark={false} autoComplete="new-password">
+        <Form.Item name="currentPassword" label="当前密码" rules={[{ required: true, message: '请输入当前密码' }]}>
+          <Input.Password placeholder="当前密码" autoComplete="current-password" />
+        </Form.Item>
+        <Form.Item
+          name="newPassword"
+          label="新密码"
+          rules={[
+            { required: true, message: '请输入新密码' },
+            { min: 8, message: '新密码至少 8 位' },
+          ]}
+        >
+          <Input.Password placeholder="至少 8 位" autoComplete="new-password" />
+        </Form.Item>
+        <Form.Item name="confirm" label="确认新密码" rules={[{ required: true, message: '请再次输入新密码' }]}>
+          <Input.Password placeholder="再次输入新密码" autoComplete="new-password" />
+        </Form.Item>
+      </Form>
+    </Modal>
   );
 }

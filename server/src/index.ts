@@ -60,24 +60,28 @@ async function main(): Promise<void> {
   const { config, configPath, missingEnvVars, warnings } = loaded;
   setLogLevel(config.server.logLevel);
 
-  // --- 1.5 安全启动闸：非回环地址监听 + 无 API Token = 任何人都能访问，直接拒绝启动 ---
-  // 纯内网场景可显式设置 AIOPS_ALLOW_INSECURE_NO_AUTH=true 跳过（会打 warn）。
+  // --- 1.5 安全启动闸 ---
+  // 现已内建 Web 登录鉴权（admin 账号 + 会话令牌），未配 apiToken 也允许对外监听；
+  // 但若显式设置 AIOPS_DISABLE_LOGIN_AUTH=true（禁用登录鉴权）且未配 apiToken，
+  // 则回到旧行为：拒绝启动或要求显式放行。
   const bindHost = config.server.host.trim().toLowerCase();
   const isLoopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
-  if (!isLoopback && !config.server.apiToken) {
+  const loginAuthDisabled = process.env.AIOPS_DISABLE_LOGIN_AUTH === 'true';
+  if (!isLoopback && !config.server.apiToken && loginAuthDisabled) {
     if (process.env.AIOPS_ALLOW_INSECURE_NO_AUTH === 'true') {
-      logger.warn('⚠ 监听非回环地址且未配置 apiToken，API 完全无鉴权（AIOPS_ALLOW_INSECURE_NO_AUTH=true 显式放行）。请确认仅在隔离内网使用。', {
+      logger.warn('⚠ 监听非回环地址且未配置 apiToken、登录鉴权已禁用，API 完全无鉴权（AIOPS_ALLOW_INSECURE_NO_AUTH=true 显式放行）。请确认仅在隔离内网使用。', {
         host: config.server.host,
         port: config.server.port,
       });
     } else {
       process.stderr.write(
-        `\n[启动失败] server.host=${config.server.host} 为非回环地址，但 server.apiToken 为空，` +
-          `API 将对任何可达者完全开放，已拒绝启动。\n` +
-          `  处理方式（二选一）：\n` +
-          `  1. 设置环境变量 AIOPS_API_TOKEN（配置中 apiToken: \${AIOPS_API_TOKEN}）；\n` +
-          `  2. 仅本机使用：把 server.host 改为 127.0.0.1；\n` +
-          `  3. 确认为隔离内网环境：显式设置 AIOPS_ALLOW_INSECURE_NO_AUTH=true。\n\n`,
+        `\n[启动失败] server.host=${config.server.host} 为非回环地址，但 server.apiToken 为空且登录鉴权已禁用` +
+          `（AIOPS_DISABLE_LOGIN_AUTH=true），API 将对任何可达者完全开放，已拒绝启动。\n` +
+          `  处理方式（任选其一）：\n` +
+          `  1. 启用内建登录鉴权：不设置 AIOPS_DISABLE_LOGIN_AUTH（推荐，默认账号 admin）；\n` +
+          `  2. 设置环境变量 AIOPS_API_TOKEN（配置中 apiToken: \${AIOPS_API_TOKEN}）；\n` +
+          `  3. 仅本机使用：把 server.host 改为 127.0.0.1；\n` +
+          `  4. 确认为隔离内网环境：显式设置 AIOPS_ALLOW_INSECURE_NO_AUTH=true。\n\n`,
       );
       process.exit(1);
     }

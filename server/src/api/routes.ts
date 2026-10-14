@@ -21,6 +21,7 @@ import { LlmRouter } from '../ai/llm-router';
 import { parseInboundAlerts, severityAtLeast } from './alert-parser';
 import { createMonitorRouter } from './monitor';
 import { createAiConfigRouter } from './ai-config';
+import { createAuthService, AuthService } from './auth';
 import { InboundAlert } from '../core/types';
 import { CommandGuard } from '../datasources/ssh';
 import { logger } from '../utils/logger';
@@ -40,23 +41,46 @@ export interface ApiContext {
   version: string;
 }
 
-/** Bearer Token 鉴权中间件（apiToken 为空时放行，仅限内网自用）。
- *  注意：只认 Authorization header；不再支持 ?token= query 传参
- *  （query 会进访问日志/浏览器历史，等同于明文泄露）。 */
-export function authMiddleware(config: AppConfig) {
+/**
+ * API 鉴权中间件：Web 会话与 Bearer API Token 二者任一通过即可。
+ *
+ * 放行规则：
+ *  1. /auth/login、/auth/status 为公开端点（登录前就要访问）；
+ *  2. Authorization: Bearer <server.apiToken> —— 兼容原有 API Token / 脚本调用；
+ *  3. Authorization: Bearer <会话令牌> —— Web 登录后签发；
+ *  4. apiToken 与会话均未配置/无效 → 401。
+ */
+export function authMiddleware(config: AppConfig, auth?: AuthService) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    const token = config.server.apiToken;
-    if (!token) {
+    // 公开端点：登录与登录状态探测
+    if (req.path === '/auth/login' || req.path === '/auth/status') {
       next();
       return;
     }
+
     const header = req.headers.authorization ?? '';
     const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
-    if (provided !== token) {
-      res.status(401).json({ error: 'unauthorized', message: '缺少或错误的 API Token' });
+
+    // 1) 静态 API Token（脚本/巡检调用兼容通道）
+    if (config.server.apiToken && provided && provided === config.server.apiToken) {
+      next();
       return;
     }
-    next();
+
+    // 2) Web 会话令牌
+    if (auth && provided && auth.verifySession(provided)) {
+      next();
+      return;
+    }
+
+    // 3) 两者都不可用
+    if (!config.server.apiToken && !auth) {
+      // 完全未启用任何鉴权（内网自用兜底，理论上下游启动闸已拦截）
+      next();
+      return;
+    }
+
+    res.status(401).json({ error: 'unauthorized', message: '未登录或凭证无效' });
   };
 }
 
@@ -73,16 +97,77 @@ export function createApiRouter(ctx: ApiContext): Router {
   const { config, db, engine, redactor } = ctx;
 
   // -------------------------------------------------------------------------
+  // Web 登录鉴权服务（管理员账号存 SQLite，密码 scrypt 哈希）
+  // -------------------------------------------------------------------------
+  const auth = createAuthService(db);
+
+  // -------------------------------------------------------------------------
   // 子路由（实时监控聚合 / AI 配置生成），全部带鉴权
   // -------------------------------------------------------------------------
-  router.use('/monitor', authMiddleware(config), createMonitorRouter({ db, engine }));
-  router.use('/ai-config', authMiddleware(config), createAiConfigRouter({
+  router.use('/monitor', authMiddleware(config, auth), createMonitorRouter({ db, engine }));
+  router.use('/ai-config', authMiddleware(config, auth), createAiConfigRouter({
     config,
     configPath: ctx.configPath,
     db,
     llm: ctx.llm,
     redactor,
   }));
+
+  // -------------------------------------------------------------------------
+  // 登录 / 会话（login 与 status 本身公开，其余端点均鉴权）
+  // -------------------------------------------------------------------------
+
+  /** 登录：校验用户名密码，签发会话令牌（HMAC，7 天有效）。 */
+  router.post('/auth/login', (req, res) => {
+    const username = String(req.body?.username ?? '');
+    const password = String(req.body?.password ?? '');
+    if (!username || !password) {
+      res.status(400).json({ error: 'bad_request', message: '用户名和密码不能为空' });
+      return;
+    }
+    // 校验凭证并签发会话（scrypt 计算本身有耗时，auth 内部已做时序均衡）
+    const result = auth.login(username, password);
+
+    if (!result) {
+      logger.warn('登录失败', { username: username.slice(0, 40), ip: req.ip });
+      res.status(401).json({ error: 'unauthorized', message: '用户名或密码错误' });
+      return;
+    }
+    logger.info('登录成功', { username: username.slice(0, 40), ip: req.ip });
+    res.json({ ok: true, token: result.token, mustChangePassword: result.mustChangePassword });
+  });
+
+  /** 登录状态探测：会话是否有效 + 是否仍为默认密码（前端启动时调用）。 */
+  router.get('/auth/status', (req, res) => {
+    const header = req.headers.authorization ?? '';
+    const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
+    const valid = !!provided && auth.verifySession(provided);
+    res.json({ authenticated: valid, mustChangePassword: valid ? auth.mustChangePassword() : false });
+  });
+
+  /** 修改密码（需登录）。成功后所有会话失效，需重新登录。 */
+  router.post('/auth/change-password', authMiddleware(config, auth), (req, res) => {
+    const currentPassword = String(req.body?.currentPassword ?? '');
+    const newPassword = String(req.body?.newPassword ?? '');
+    if (!currentPassword || !newPassword) {
+      res.status(400).json({ error: 'bad_request', message: '当前密码与新密码不能为空' });
+      return;
+    }
+    const result = auth.changePassword(currentPassword, newPassword);
+    if (!result.ok) {
+      res.status(400).json({ error: 'bad_request', message: result.error });
+      return;
+    }
+    db.insertAudit({
+      id: `aud_${Date.now().toString(36)}`,
+      at: new Date().toISOString(),
+      actor: 'admin',
+      action: 'auth.password_changed',
+      target: 'admin',
+      detail: {},
+    });
+    res.json({ ok: true, message: '密码已修改，请重新登录' });
+  });
 
   // -------------------------------------------------------------------------
   // 健康与元信息（不鉴权，供容器 healthcheck 使用）
@@ -98,7 +183,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   });
 
   /** 数据源可达性（带鉴权，避免暴露内网拓扑） */
-  router.get('/datasources/health', authMiddleware(config), async (_req, res) => {
+  router.get('/datasources/health', authMiddleware(config, auth), async (_req, res) => {
     const ds = await engine.datasourceHealth();
     res.json({
       config: {
@@ -116,7 +201,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   // -------------------------------------------------------------------------
 
   /** 列表（工作台首页 ProTable 数据源） */
-  router.get('/diagnoses', authMiddleware(config), (req, res) => {
+  router.get('/diagnoses', authMiddleware(config, auth), (req, res) => {
     const limit = Math.min(Number(req.query.limit ?? 20), 200);
     const offset = Math.max(Number(req.query.offset ?? 0), 0);
     const status = req.query.status ? String(req.query.status) : undefined;
@@ -146,7 +231,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   });
 
   /** 详情（故障卡片页） */
-  router.get('/diagnoses/:id', authMiddleware(config), (req, res) => {
+  router.get('/diagnoses/:id', authMiddleware(config, auth), (req, res) => {
     const task = db.getTask(req.params.id);
     if (!task) {
       res.status(404).json({ error: 'not_found', message: `诊断任务 ${req.params.id} 不存在` });
@@ -156,7 +241,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   });
 
   /** 手动触发诊断（工作台提问入口） */
-  router.post('/diagnoses', authMiddleware(config), async (req, res) => {
+  router.post('/diagnoses', authMiddleware(config, auth), async (req, res) => {
     const question = String(req.body?.question ?? '').trim();
     if (!question) {
       res.status(400).json({ error: 'bad_request', message: 'question 不能为空' });
@@ -194,7 +279,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   });
 
   /** 人工反馈（准确率度量 + 知识库迭代输入） */
-  router.post('/diagnoses/:id/feedback', authMiddleware(config), (req, res) => {
+  router.post('/diagnoses/:id/feedback', authMiddleware(config, auth), (req, res) => {
     const task = db.getTask(req.params.id);
     if (!task) {
       res.status(404).json({ error: 'not_found', message: '诊断任务不存在' });
@@ -221,7 +306,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   });
 
   /** 把这次诊断沉淀为案例（二期知识库的输入） */
-  router.post('/diagnoses/:id/promote-to-case', authMiddleware(config), (req, res) => {
+  router.post('/diagnoses/:id/promote-to-case', authMiddleware(config, auth), (req, res) => {
     const task = db.getTask(req.params.id);
     if (!task) {
       res.status(404).json({ error: 'not_found', message: '诊断任务不存在' });
@@ -253,7 +338,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   // 服务注册表（前端展示 + 校验配置）
   // -------------------------------------------------------------------------
 
-  router.get('/services', authMiddleware(config), (_req, res) => {
+  router.get('/services', authMiddleware(config, auth), (_req, res) => {
     res.json({
       total: config.services.length,
       items: config.services.map((s) => ({
@@ -277,7 +362,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   // 案例库
   // -------------------------------------------------------------------------
 
-  router.get('/cases', authMiddleware(config), (req, res) => {
+  router.get('/cases', authMiddleware(config, auth), (req, res) => {
     const serviceName = req.query.service ? String(req.query.service) : undefined;
     const limit = Math.min(Number(req.query.limit ?? 50), 200);
     const items = db.listCases(serviceName, limit);
@@ -288,7 +373,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   // 告警
   // -------------------------------------------------------------------------
 
-  router.get('/alerts', authMiddleware(config), (req, res) => {
+  router.get('/alerts', authMiddleware(config, auth), (req, res) => {
     const limit = Math.min(Number(req.query.limit ?? 50), 200);
     res.json({ items: db.listAlerts(limit) });
   });
@@ -392,7 +477,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   // 成果度量（谈判弹药）
   // -------------------------------------------------------------------------
 
-  router.get('/metrics/summary', authMiddleware(config), (_req, res) => {
+  router.get('/metrics/summary', authMiddleware(config, auth), (_req, res) => {
     res.json(db.getMetricsSummary(config.metrics.manualBaselineMinutes));
   });
 
@@ -440,7 +525,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   // 审计日志（只读边界的证据）
   // -------------------------------------------------------------------------
 
-  router.get('/audit', authMiddleware(config), (req, res) => {
+  router.get('/audit', authMiddleware(config, auth), (req, res) => {
     const limit = Math.min(Number(req.query.limit ?? 100), 500);
     res.json({ items: db.listAudit(limit) });
   });
@@ -449,7 +534,7 @@ export function createApiRouter(ctx: ApiContext): Router {
   // 安全自检：证明只读边界生效（演示/验收用）
   // -------------------------------------------------------------------------
 
-  router.post('/security/check-command', authMiddleware(config), (req, res) => {
+  router.post('/security/check-command', authMiddleware(config, auth), (req, res) => {
     const command = String(req.body?.command ?? '');
     const hostId = req.body?.hostId ? String(req.body.hostId) : undefined;
 

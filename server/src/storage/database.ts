@@ -599,6 +599,22 @@ export class Database {
     return marked;
   }
 
+  // -------------------------------------------------------------------------
+  // 通用底层方法（供 auth 等模块做幂等建表与简单读写）
+  // -------------------------------------------------------------------------
+
+  execRaw(sql: string): void {
+    this.db.exec(sql);
+  }
+
+  runRaw(sql: string, ...args: unknown[]): void {
+    this.db.prepare(sql).run(...(args as never[]));
+  }
+
+  getOne(sql: string, ...args: unknown[]): Record<string, unknown> | undefined {
+    return this.db.prepare(sql).get(...(args as never[])) as Record<string, unknown> | undefined;
+  }
+
   close(): void {
     try {
       this.db.close();

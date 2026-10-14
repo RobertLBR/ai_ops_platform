@@ -22,6 +22,22 @@ import type {
 } from './types';
 
 const TOKEN_KEY = 'aiops_api_token';
+const SESSION_KEY = 'aiops_session_token';
+
+/** Web 登录会话令牌（localStorage 持久化，7 天有效由后端控制） */
+export function getSession(): string {
+  return localStorage.getItem(SESSION_KEY) ?? '';
+}
+
+export function setSession(token: string): void {
+  if (token) localStorage.setItem(SESSION_KEY, token);
+  else localStorage.removeItem(SESSION_KEY);
+}
+
+/** 登录状态（App 启动时由 /auth/status 校验结果驱动） */
+export function isLoggedIn(): boolean {
+  return !!getSession();
+}
 
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? '';
@@ -48,8 +64,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     Accept: 'application/json',
     ...((init.headers as Record<string, string>) ?? {}),
   };
+  // 优先会话令牌（Web 登录），其次静态 API Token（脚本兼容）
+  const session = getSession();
   const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (session) headers.Authorization = `Bearer ${session}`;
+  else if (token) headers.Authorization = `Bearer ${token}`;
   if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
 
   let res: Response;
@@ -85,6 +104,25 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   health: () => request<{ status: string; version: string; uptimeSeconds: number; time: string }>('/health'),
+
+  // -------------------------------------------------------------------------
+  // Web 登录鉴权
+  // -------------------------------------------------------------------------
+
+  login: (username: string, password: string) =>
+    request<{ ok: boolean; token: string; mustChangePassword: boolean }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+
+  authStatus: (signal?: AbortSignal) =>
+    request<{ authenticated: boolean; mustChangePassword: boolean }>('/auth/status', { signal }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: boolean; message: string }>('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
 
   datasourceHealth: () =>
     request<{
